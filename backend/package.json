@@ -1,0 +1,31 @@
+{
+  "name": "script-generator-assistant",
+  "version": "1.0.0",
+  "description": "Added Data Ingestion installation steps:",
+  "main": "src/api/fastapi_server.py",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "start": "npm run start:backend",
+    "start:backend": ".\\.venv\\Scripts\\python.exe -m uvicorn src.api.fastapi_server:app --host 0.0.0.0 --port 8000",
+    "start:api": "npm run start:backend",
+    "start:frontend": ".\\.venv\\Scripts\\python.exe -m http.server 3000 --directory ..\\frontend",
+    "start:chrome": "start \"\" \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --remote-debugging-port=9222",
+    "record:trace": "node record-trace.js",
+    "mcp:codegen-refiner": "node src/mcp/codegen_refiner_server.js",
+    "refine:llm": "node src/script_generator/refine-with-llm.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "allure-playwright": "^3.10.2",
+    "concurrently": "^9.2.1"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "xlsx": "^0.18.5"
+  }
+}

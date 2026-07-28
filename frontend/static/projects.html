@@ -1,0 +1,123 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Projects Browser</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; background: #faf7f0; margin: 0; padding: 24px; color: #1e293b; }
+  h1 { font-size: 22px; margin: 0 0 16px; }
+  .row { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  select { padding: 8px 12px; font-size: 14px; border: 1px solid #d4c9b3; border-radius: 6px; min-width: 250px; background: white; }
+  .status { color: #64748b; font-size: 13px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+  .card { background: white; border: 1px solid #e5e7eb; border-radius: 10px; padding: 14px; cursor: pointer; transition: all 0.15s; }
+  .card:hover { border-color: #2563eb; box-shadow: 0 2px 8px rgba(37, 99, 235, 0.1); transform: translateY(-1px); }
+  .card-name { font-weight: 600; margin-bottom: 6px; word-break: break-all; font-size: 14px; }
+  .card-meta { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #64748b; }
+  .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
+  .badge-sanity { background: #dbeafe; color: #1e40af; }
+  .badge-regression { background: #fef3c7; color: #92400e; }
+  .badge-data { background: #dcfce7; color: #14532d; }
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; padding: 24px; z-index: 100; }
+  .modal.open { display: flex; }
+  .modal-dialog { background: white; border-radius: 12px; width: 100%; max-width: 1000px; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; }
+  .modal-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid #e5e7eb; }
+  .modal-head h2 { margin: 0; font-size: 16px; word-break: break-all; }
+  .modal-close { background: none; border: none; color: #475569; font-size: 22px; cursor: pointer; padding: 0 6px; }
+  .modal-body { padding: 16px; overflow: auto; flex: 1; }
+  pre { margin: 0; background: #0f172a; color: #e2e8f0; padding: 16px; border-radius: 8px; overflow: auto; font-family: Consolas, Monaco, monospace; font-size: 13px; line-height: 1.5; white-space: pre; }
+  .err { color: #b91c1c; }
+</style>
+</head>
+<body>
+  <h1>Projects Browser</h1>
+  <div class="row">
+    <label for="projDropdown"><strong>Project:</strong></label>
+    <select id="projDropdown"><option value="">Loading...</option></select>
+    <span class="status" id="status"></span>
+  </div>
+  <div id="cards" class="cards"></div>
+  <div id="modal" class="modal">
+    <div class="modal-dialog">
+      <div class="modal-head">
+        <h2 id="modalTitle">File</h2>
+        <button class="modal-close" id="modalClose">&times;</button>
+      </div>
+      <div class="modal-body"><pre id="modalCode">Loading...</pre></div>
+    </div>
+  </div>
+<script>
+const dropdown = document.getElementById('projDropdown');
+const statusEl = document.getElementById('status');
+const cardsEl  = document.getElementById('cards');
+const modal    = document.getElementById('modal');
+const modalTitle = document.getElementById('modalTitle');
+const modalCode  = document.getElementById('modalCode');
+document.getElementById('modalClose').onclick = () => modal.classList.remove('open');
+modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('open'); });
+
+async function loadProjects() {
+  statusEl.textContent = 'Loading projects...';
+  try {
+    const res = await fetch('/api/projects/names');
+    const data = await res.json();
+    if (!data.ok || !data.items.length) {
+      dropdown.innerHTML = '<option value="">No projects</option>';
+      statusEl.textContent = '0 projects';
+      return;
+    }
+    dropdown.innerHTML = data.items.map((n, i) => `<option value="${n}" ${i === 0 ? 'selected' : ''}>${n}</option>`).join('');
+    statusEl.textContent = data.count + ' project(s)';
+    loadFiles(data.items[0]);
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+  }
+}
+
+async function loadFiles(name) {
+  cardsEl.innerHTML = '<div class="status">Loading files...</div>';
+  try {
+    const res = await fetch('/api/projects/files?name=' + encodeURIComponent(name));
+    const data = await res.json();
+    if (!data.ok) { cardsEl.innerHTML = '<div class="status err">' + data.error + '</div>'; return; }
+    if (!data.items.length) { cardsEl.innerHTML = '<div class="status">No files.</div>'; return; }
+    cardsEl.innerHTML = data.items.map(it => `
+      <div class="card" data-relpath="${it.relpath}" data-name="${it.name}">
+        <div class="card-name">${it.name}</div>
+        <div class="card-meta">
+          <span class="badge badge-${it.suite}">${it.suite}</span>
+          <span>${(it.size / 1024).toFixed(1)} KB</span>
+        </div>
+      </div>
+    `).join('');
+    cardsEl.querySelectorAll('.card').forEach(c => {
+      c.addEventListener('click', () => openFile(name, c.dataset.relpath, c.dataset.name));
+    });
+  } catch (err) { cardsEl.innerHTML = '<div class="status err">' + err.message + '</div>'; }
+}
+
+async function openFile(projectName, relpath, displayName) {
+  modalTitle.textContent = projectName + ' / ' + displayName;
+  modalCode.textContent = 'Loading file content...';
+  modal.classList.add('open');
+  try {
+    const filesRes = await fetch('/api/projects/files?name=' + encodeURIComponent(projectName));
+    const filesData = await filesRes.json();
+    if (!filesData.ok) throw new Error(filesData.error || 'Could not load project info');
+    const projectPath = filesData.project.path;
+    const fullPath = projectPath + (projectPath.includes('\\') ? '\\' : '/') + relpath.replace(/\//g, projectPath.includes('\\') ? '\\' : '/');
+    const url = '/api/projects/file?filePath=' + encodeURIComponent(fullPath);
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'Failed to load file');
+    modalCode.textContent = data.content || '(empty file)';
+  } catch (err) {
+    modalCode.innerHTML = '<span class="err">' + err.message + '</span>';
+  }
+}
+
+dropdown.addEventListener('change', e => { if (e.target.value) loadFiles(e.target.value); });
+loadProjects();
+</script>
+</body>
+</html>

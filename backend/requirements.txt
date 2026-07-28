@@ -1,0 +1,8 @@
+# Backend
+fastapi
+uvicorn[standard]
+
+# Utils
+python-dotenv==1.0.1
+Faker==25.9.2
+psycopg2-binary==2.9.12

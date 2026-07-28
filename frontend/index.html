@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Playwright Workflow API</title>
+    <link rel="stylesheet" href="/static/styles.css?v=duplicate-test-message-1" />
+  </head>
+  <body>
+    
+    <main class="shell">
+      <section class="hero">
+        <div class="eyebrow">Playwright Workflow</div>
+        <h1>Auto-script Generation</h1>
+        <p class="lede">
+          Record and Refine script with AI assistance. Run the generated specs and view results in one place.
+        </p>
+      </section>
+
+      <section class="workflow-grid" id="workflow">
+        <article class="panel project-panel">
+          <div class="panel-label">Project</div>
+          <h2>Select Or Create</h2>
+          <span id="project-path-status" hidden>Not configured</span>
+          <div class="form">
+            <label>
+              <span>Project</span>
+              <select id="project-select" name="projectSelect">
+                <option value="">Select Project</option>
+              </select>
+            </label>
+            <input id="project-path" name="projectPath" type="hidden" />
+            <label>
+              <span>Local location</span>
+              <div class="path-actions">
+                <input id="project-create-location" name="projectCreateLocation" type="text" placeholder="Choose where the project folder should be created" readonly />
+                <button id="browse-project-location" class="button button-secondary" type="button">Browse</button>
+              </div>
+            </label>
+            <label>
+              <span>GitHub URL</span>
+              <input id="project-github-url" name="projectGithubUrl" type="url" placeholder="https://github.com/org/repo.git" />
+            </label>
+            <div class="path-actions">
+              <input id="project-create-name" name="projectCreateName" type="text" placeholder="new-project-name" />
+              <span id="project-create-name-status" class="name-check-status" style="font-size:12px; margin-left:8px; display:inline-block; min-height:16px;"></span>
+              <button id="create-project" class="button button-secondary" type="button">Create Project</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel record-panel">
+          <div class="panel-label">Generate</div>
+          <h2>Record And Auto Generate</h2>
+          <form id="record-form" class="form two-column-form">
+            <label>
+              <span>Target URL</span>
+              <input id="record-url" name="url" type="url" placeholder="https://shop.polymer-project.org/" required />
+            </label>
+            <label>
+              <span>Browser</span>
+              <select id="record-browser" name="browser">
+                <option value="chromium">Chromium</option>
+                <option value="msedge">Edge</option>
+                <option value="firefox">Firefox</option>
+                <option value="webkit">WebKit</option>
+              </select>
+            </label>
+            <label>
+              <span>Test Type</span>
+              <select id="record-test-type" name="testType">
+                <option value="">General</option>
+                <option value="sanity">Sanity test</option>
+                <option value="regression">Regression test</option>
+              </select>
+            </label>
+            <label>
+              <span>Viewport width</span>
+              <input id="record-viewport-width" name="viewportWidth" type="number" min="320" max="3840" step="1" placeholder="1280" />
+            </label>
+            <label>
+              <span>Viewport height</span>
+              <input id="record-viewport-height" name="viewportHeight" type="number" min="320" max="2160" step="1" placeholder="720" />
+            </label>
+            <label>
+              <span>Output name</span>
+              <input id="record-output-name" name="fileName" type="text" placeholder="flipkart-latest" />
+              <span id="record-output-name-status" class="name-check-status" style="font-size:12px; margin-left:4px; display:block; min-height:16px;"></span>
+            </label>
+            <label>
+              <span>Test title</span>
+              <input id="record-test-name" name="testName" type="text" placeholder="Flipkart recorded flow" />
+            </label>
+            <div id="record-form-message" class="form-message form-message-wide" hidden></div>
+            <div class="form-actions">
+              <button class="button button-primary" type="submit">Start Recorder + AI Generate</button>
+            </div>
+          </form>
+          <p class="hint">The generated script is saved under the selected project's sanity or regression suite.</p>
+        </article>
+
+      </section>
+
+
+
+      <section class="grid secondary latest-files-grid">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-label">Latest Masked Codegen</div>
+              <h2 id="latest-codegen-path">No codegen file yet</h2>
+            </div>
+          </div>
+          <pre id="latest-codegen-content" class="result">{ "message": "Latest masked codegen content will appear here after recording." }</pre>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-label">Latest AI File</div>
+              <h2 id="latest-ai-path">No AI file yet</h2>
+            </div>
+          </div>
+          <pre id="latest-ai-content" class="result">{ "message": "Latest AI-generated file content will appear here after generation." }</pre>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-label">Latest Test Data</div>
+              <h2 id="latest-testdata-path">No test data file yet</h2>
+            </div>
+          </div>
+          <pre id="latest-testdata-content" class="result">{ "message": "Latest test data content will appear here after generation." }</pre>
+        </article>
+
+      </section>
+            <section class="panel projects-panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-label">Projects</div>
+            <h2>Available Projects</h2>
+          </div>
+          <button id="refresh-projects" class="button button-secondary" type="button">Refresh</button>
+        </div>
+        <div id="project-list" class="project-list"></div>
+      </section>
+
+      <section class="panel result-panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-label">Response</div>
+            <h2>Live Output</h2>
+          </div>
+          <div id="status-pill" class="status-pill status-idle">Idle</div>
+        </div>
+        <div id="workflow-progress" class="workflow-progress" hidden></div>
+        <pre id="result" class="result">{ "message": "Run a workflow step to see the response here." }</pre>
+      </section>
+
+      <section class="panel llm-usage-panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-label">LLM Usage</div>
+            <h2>Token Usage And Cost</h2>
+          </div>
+        </div>
+        <div id="llm-usage-summary" class="artifact-summary">No LLM usage recorded yet.</div>
+      </section>
+
+    <section class="panel" id="heal-result-panel" hidden>
+      <div class="panel-head">
+        <div>
+          <div class="panel-label">Self-Healing</div>
+          <h2 id="heal-result-title">Heal result</h2>
+        </div>
+      </div>
+      <div id="heal-result-summary" class="artifact-summary"></div>
+      <pre id="heal-result-details" class="result"></pre>
+    </section>
+    <div id="assertion-popup" class="assertion-popup" data-mode="chooser" hidden>
+      <div class="assertion-popup-head">
+        <div>
+          <div class="panel-label">Assertions</div>
+          <h3 id="assertion-popup-title">Step suggestions</h3>
+        </div>
+        <div class="assertion-popup-head-actions">
+          <button id="assertion-popup-mode-toggle" class="button button-secondary assertion-popup-mode-toggle" type="button" hidden>Back</button>
+          <button id="assertion-popup-close" class="button button-secondary assertion-popup-close" type="button">Close</button>
+        </div>
+      </div>
+      <div id="assertion-popup-meta" class="assertion-popup-meta"></div>
+      <div id="assertion-popup-body" class="assertion-popup-body"></div>
+    </div>
+    </main>
+    <script src="/static/app.js?v=jenkins-scope-1"></script>
+
+<!-- Flaky Tests Modal -->
+<div id="flakyTestsModal" class="modal" hidden>
+  <div class="modal-backdrop"></div>
+  <div class="modal-dialog flaky-modal-dialog">
+    <div class="modal-header">
+      <h2 id="flakyModalTitle">📊 Flaky Tests</h2>
+      <button id="flakyModalClose" type="button" class="modal-close" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="flakyModalStatus" class="ga-hint" style="margin-bottom: 8px;"></div>
+      <div id="flakyModalSummary" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;"></div>
+      <div id="flakyModalTableWrap" style="overflow-x: auto;">
+        <table id="flakyModalTable" class="flaky-table" style="width: 100%; border-collapse: collapse;">
+          <thead>
+            <tr style="background: #f4ede2; text-align: left;">
+              <th style="padding: 8px;">TC Key</th>
+              <th style="padding: 8px;">Test Name</th>
+              <th style="padding: 8px;">Spec File</th>
+              <th style="padding: 8px; text-align: right;">Total Runs</th>
+              <th style="padding: 8px; text-align: right;">Passed</th>
+              <th style="padding: 8px; text-align: right;">Failed</th>
+              <th style="padding: 8px; text-align: right;">Flaky Score</th>
+              <th style="padding: 8px;">Last Status</th>
+              <th style="padding: 8px;">Last Run</th>
+            </tr>
+          </thead>
+          <tbody id="flakyModalTbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+
+
+
+
+  <!-- Git Actions Modal -->
+  <div id="gitActionsModal" class="ga-modal-overlay" hidden>
+    <div class="ga-modal-card" role="dialog" aria-modal="true" aria-labelledby="gaModalTitle">
+      <div class="ga-modal-header">
+        <h2 id="gaModalTitle">Git Actions</h2>
+        <button id="gaModalClose" type="button" class="ga-modal-close" aria-label="Close">×</button>
+      </div>
+      <div class="ga-modal-body">
+
+        <!-- Section 1: Initialize Git -->
+        <section class="ga-section">
+          <h3 class="ga-section-title">Git Initialization</h3>
+            <label class="ga-field-label" id="gaGithubUrlWrap" style="display: none;">
+            <span>GitHub Repository URL</span>
+            <input id="gaGithubUrlInput" type="text" class="ga-input" placeholder="https://github.com/user/repo.git" />
+          </label>
+          <div class="ga-section-row">
+            <button id="gaInitGitBtn" type="button" class="button button-primary">Initialize Git</button>
+            <span id="gaGitStatusLabel" class="ga-hint">Checking status...</span>
+          </div>
+        </section>
+
+        <!-- Section 2: Commit & Push -->
+        <section class="ga-section">
+          <h3 class="ga-section-title">Commit & Push</h3>
+          <div id="gaRemoteStatusLabel" class="ga-hint" style="margin-bottom: 8px;">Checking remote status...</div>
+          <label class="ga-field-label">
+            <span>Commit Message</span>
+            <input id="gaCommitMessage" type="text" class="ga-input" value="Update framework from UI" placeholder="Enter commit message" />
+          </label>
+          <div class="ga-button-row">
+            <button id="gaPullLatestBtn" type="button" class="button button-secondary" hidden>Pull Latest</button>
+            <button id="gaCommitPushBtn" type="button" class="button button-primary" disabled>Commit & Push</button>
+          </div>
+          <div id="gaPushHint" class="ga-hint" style="margin-top: 6px;"></div>
+        </section>
+
+        <!-- Section 3: Jenkins -->
+        <section class="ga-section">
+          <h3 class="ga-section-title">Jenkins</h3>
+          <div id="gaJenkinsExistingBanner" style="display:none; padding:8px 12px; margin-bottom:8px; background:#dbeafe; color:#1e40af; border-radius:6px; font-size:13px;"></div>
+          <label class="ga-field-label">
+            <span>Job Name</span>
+            <input id="gaJenkinsJobName" type="text" class="ga-input" placeholder="Jenkins job name" />
+            <span id="gaJenkinsJobNameStatus" style="font-size:12px; display:block; min-height:16px; margin-top:4px;"></span>
+          </label>
+          <div class="ga-button-row">
+            <button id="gaCreateJobBtn" type="button" class="button button-primary">Create Job</button>
+          </div>
+
+          <label class="ga-field-label">
+            <span>Execution</span>
+            <select id="gaJenkinsExecution" class="ga-input">
+              <option value="parallel" selected>Parallel</option>
+              <option value="sequential">Sequential</option>
+            </select>
+          </label>
+          <div class="ga-button-row">
+            <button id="gaJenkinsRunSanityBtn" type="button" class="button button-secondary">Run Sanity (Jenkins)</button>
+            <button id="gaJenkinsRunRegressionBtn" type="button" class="button button-primary">Run Regression (Jenkins)</button>
+          </div>
+        </section>
+
+      </div>
+    </div>
+  </div>
+  </html>

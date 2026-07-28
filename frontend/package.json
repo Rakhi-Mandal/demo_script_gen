@@ -1,0 +1,8 @@
+{
+  "name": "script-generator-ui",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "..\\backend\\.venv\\Scripts\\python.exe -m http.server 3000 --directory ."
+  }
+}

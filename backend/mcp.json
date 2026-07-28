@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--cdp-endpoint", "http://127.0.0.1:9222",
+        "--codegen", "typescript",
+        "--caps", "devtools",
+        "--output-dir", "./codegen-output",
+        "--save-trace",
+        "--console-level", "info"
+      ]
+    },
+    "codegen-refiner": {
+      "command": "node",
+      "args": [
+        "./src/mcp/codegen_refiner_server.js"
+      ]
+    }
+  }
+}

@@ -1,0 +1,50 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Node
+node_modules/
+
+# Vector store
+chroma_db/
+
+# Playwright run outputs
+test-results/
+backend/test-results/
+backend/tests/**/test-results/
+playwright-report/
+backend/playwright-report/
+backend/tests/**/playwright-report/
+allure-report
+allure-results
+
+# Recorder artifacts
+backend/codegen-output/codegen-*.js
+backend/codegen-output/actions-*.json
+
+# Masked intermediate files
+backend/tests/masked/
+
+# DOM snapshots and heal logs
+**/dom_catalog_insession_*.json
+**/inline_heals.json
+
+# Per-developer local state
+backend/codegen-output/local-projects.json
+backend/codegen-output/latest-workflow.json
+
+# OS junk
+.DS_Store
+Thumbs.db

@@ -1,0 +1,283 @@
+"""
+Database connection and helpers for the tracking schema.
+
+Reads connection settings from .env:
+  DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+
+Provides:
+  - get_db_connection() — short-lived connection (caller closes it)
+  - upsert_project(name, path) — insert or fetch project row, returns dict
+"""
+
+from __future__ import annotations
+
+import os
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
+
+
+# Load .env from the backend root (one level above this file's directory)
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
+load_dotenv(dotenv_path=_BACKEND_ROOT / ".env")
+
+
+def get_db_connection():
+    """Return a new psycopg2 connection. Caller is responsible for closing it."""
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5432")),
+        dbname=os.getenv("DB_NAME", "automation_db"),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", ""),
+        cursor_factory=RealDictCursor,
+    )
+
+
+@contextmanager
+def db_cursor() -> Iterator[Any]:
+    """Context manager: opens a connection, yields cursor, commits on success."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        try:
+            yield cur
+            conn.commit()
+        finally:
+            cur.close()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def upsert_project(name: str, path: str, git_initialized: bool = False) -> dict[str, Any]:
+    """
+    Insert a project row. If a project with the same name already exists,
+    return that existing row instead (with path/git_initialized updated).
+    """
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO projects (name, path, git_initialized)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (name) DO UPDATE
+              SET path = EXCLUDED.path,
+                  git_initialized = EXCLUDED.git_initialized,
+                  updated_at = NOW()
+            RETURNING id, name, path, git_initialized, created_at, updated_at,
+                      (xmax = 0) AS is_new
+            """,
+            (name, path, git_initialized),
+        )
+        row = cur.fetchone()
+        return {
+            "id": str(row["id"]),
+            "name": row["name"],
+            "path": row["path"],
+            "git_initialized": bool(row["git_initialized"]),
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+            "is_new": bool(row["is_new"]),
+        }
+
+
+def get_project_by_path(path: str) -> dict[str, Any] | None:
+    """Return the project row matching this absolute path, or None."""
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT id, name, path, git_initialized, created_at, updated_at FROM projects WHERE path = %s LIMIT 1",
+            (path,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": str(row["id"]),
+            "name": row["name"],
+            "path": row["path"],
+            "git_initialized": bool(row["git_initialized"]),
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        }
+    
+def set_git_initialized(project_path: str, value: bool = True) -> dict[str, Any] | None:
+    """Mark a project as git-initialized (or not) in the DB. Returns updated row or None if not found."""
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE projects
+            SET git_initialized = %s,
+                updated_at = NOW()
+            WHERE path = %s
+            RETURNING id, name, path, git_initialized, created_at, updated_at
+            """,
+            (value, project_path),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": str(row["id"]),
+            "name": row["name"],
+            "path": row["path"],
+            "git_initialized": bool(row["git_initialized"]),
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        }
+    
+def touch_project(project_path: str) -> bool:
+    """Update the updated_at timestamp for a project. Returns True if a row was updated."""
+    with db_cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET updated_at = NOW() WHERE path = %s",
+            (project_path,),
+        )
+        return cur.rowcount > 0
+
+def _next_test_case_key(cur, project_id: str) -> str:
+    """Generate the next sequential test_case_key for a project: TC-001, TC-002, ..."""
+    cur.execute(
+        """
+        SELECT test_case_key FROM test_cases
+        WHERE project_id = %s AND test_case_key LIKE 'TC-%%'
+        ORDER BY test_case_key DESC LIMIT 1
+        """,
+        (project_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return "TC-001"
+    try:
+        last_num = int(str(row["test_case_key"]).split("-")[1])
+        return f"TC-{last_num + 1:03d}"
+    except (ValueError, IndexError):
+        return "TC-001"
+
+
+def upsert_test_case(
+    project_path: str,
+    spec_relpath: str,
+    test_name: str,
+    test_type: str = "sanity",
+) -> dict[str, Any] | None:
+    """
+    Insert or update a test_cases row for the given (project, spec, test).
+
+    - Looks up the project by path. If not found, returns None and logs a warning.
+    - Auto-generates test_case_key (TC-001, TC-002, ...) on first insert.
+    - On conflict (same project+relpath+name), updates tags/updated_at only.
+
+    Returns the row dict or None.
+    """
+    with db_cursor() as cur:
+        # Find project_id
+        cur.execute(
+            "SELECT id FROM projects WHERE path = %s LIMIT 1",
+            (project_path,),
+        )
+        project_row = cur.fetchone()
+        if not project_row:
+            print(f"[db] upsert_test_case: project not found for path {project_path}")
+            return None
+        project_id = project_row["id"]
+
+        # Check if test_case already exists
+        cur.execute(
+            """
+            SELECT testcase_id FROM test_cases
+            WHERE project_id = %s AND spec_relpath = %s AND test_name = %s
+            LIMIT 1
+            """,
+            (project_id, spec_relpath, test_name),
+        )
+        existing = cur.fetchone()
+
+        if existing:
+            # Update tags + updated_at on existing row
+            cur.execute(
+                """
+                UPDATE test_cases
+                SET tags = %s, updated_at = NOW()
+                WHERE testcase_id = %s
+                RETURNING testcase_id, project_id, test_case_key, spec_relpath,
+                          test_name, tags, created_at, updated_at, is_spec_modified
+                """,
+                (test_type, existing["testcase_id"]),
+            )
+        else:
+            # Insert new row
+            test_case_key = _next_test_case_key(cur, project_id)
+            cur.execute(
+                """
+                INSERT INTO test_cases
+                  (project_id, test_case_key, spec_relpath, test_name, tags, is_spec_modified)
+                VALUES (%s, %s, %s, %s, %s, FALSE)
+                RETURNING testcase_id, project_id, test_case_key, spec_relpath,
+                          test_name, tags, created_at, updated_at, is_spec_modified
+                """,
+                (project_id, test_case_key, spec_relpath, test_name, test_type),
+            )
+
+        row = cur.fetchone()
+        return {
+            "testcase_id": str(row["testcase_id"]),
+            "project_id": str(row["project_id"]),
+            "test_case_key": row["test_case_key"],
+            "spec_relpath": row["spec_relpath"],
+            "test_name": row["test_name"],
+            "tags": row["tags"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+            "is_spec_modified": bool(row["is_spec_modified"]),
+        }
+
+
+def mark_spec_modified(
+    project_path: str,
+    spec_relpath: str,
+    test_name: str | None = None,
+    modified: bool = True,
+) -> int:
+    """
+    Set is_spec_modified for matching test_cases.
+
+    - If test_name is provided, updates only that specific test.
+    - Otherwise updates all test_cases for that project + spec_relpath.
+
+    Returns the number of rows updated.
+    """
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT id FROM projects WHERE path = %s LIMIT 1",
+            (project_path,),
+        )
+        project_row = cur.fetchone()
+        if not project_row:
+            return 0
+        project_id = project_row["id"]
+
+        if test_name:
+            cur.execute(
+                """
+                UPDATE test_cases
+                SET is_spec_modified = %s, updated_at = NOW()
+                WHERE project_id = %s AND spec_relpath = %s AND test_name = %s
+                """,
+                (modified, project_id, spec_relpath, test_name),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE test_cases
+                SET is_spec_modified = %s, updated_at = NOW()
+                WHERE project_id = %s AND spec_relpath = %s
+                """,
+                (modified, project_id, spec_relpath),
+            )
+        return cur.rowcount
