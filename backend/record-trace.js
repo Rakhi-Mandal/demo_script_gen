@@ -34,9 +34,6 @@ const OUT_DIR =
 
 const FINALIZE_ENQUEUE_GRACE_MS = 500;
 
-const DUPLICATE_CLICK_WINDOW_MS = 400;
-const CLICK_SIGNATURE_RETENTION_MS = 3000;
-
 const SELECTOR_REQUIRED_ACTIONS =
     new Set([
         "click",
@@ -613,47 +610,45 @@ function buildActionKey(action) {
     }
 }
 
-function createClickSignature(
+/**
+ * Returns the XPath used only for consecutive click comparison.
+ *
+ * listeners.js supplies xpathKey using this order:
+ *
+ * 1. ID-based XPath when the element has an id.
+ * 2. Otherwise the normal generated XPath.
+ *
+ * Fall back to clickId or the accepted selector when xpathKey is absent.
+ */
+function getClickXPathComparisonValue(
     job,
     built
 ) {
-    const fingerprint =
-        job?.fingerprint ||
-        {};
+    const candidates = [
+        job?.xpathKey,
+        job?.clickId,
+        job?.capturedAction
+            ?.xpathKey,
+        job?.capturedAction
+            ?.clickId,
+        built?.selector
+    ];
 
-    return [
-        job?.frameInfo?.frameUrl ||
-            job?.url ||
-            "",
+    for (
+        const candidate of
+        candidates
+    ) {
+        const normalized =
+            normalizeClickSelector(
+                candidate
+            );
 
-        built?.selector ||
-            "",
+        if (normalized) {
+            return normalized;
+        }
+    }
 
-        built?.primary_xpath ||
-            "",
-
-        built?.backup_xpath ||
-            "",
-
-        fingerprint.tag ||
-            "",
-
-        fingerprint.ariaLabel ||
-            "",
-
-        fingerprint.role ||
-            "",
-
-        fingerprint.type ||
-            "",
-
-        fingerprint.name ||
-            "",
-
-        fingerprint.text ||
-            job?.text ||
-            ""
-    ].join("::");
+    return "";
 }
 
 (async () => {
@@ -714,58 +709,18 @@ function createClickSignature(
     let finalized = false;
     let lastAcceptedActionKey = null;
 
-    const acceptedClickIds =
-        new Set();
-
-    const recentClickSignatures =
-        new Map();
-
-    function removeExpiredClickSignatures() {
-        const now =
-            Date.now();
-
-        for (
-            const [
-                signature,
-                storedAt
-            ] of recentClickSignatures
-        ) {
-            if (
-                now - storedAt >
-                CLICK_SIGNATURE_RETENTION_MS
-            ) {
-                recentClickSignatures
-                    .delete(
-                        signature
-                    );
-            }
-        }
-    }
-
-    function isDuplicatePhysicalClick(
-        signature
-    ) {
-        removeExpiredClickSignatures();
-
-        const now =
-            Date.now();
-
-        const previousAt =
-            recentClickSignatures.get(
-                signature
-            );
-
-        recentClickSignatures.set(
-            signature,
-            now
-        );
-
-        return (
-            previousAt !== undefined &&
-            now - previousAt <=
-                DUPLICATE_CLICK_WINDOW_MS
-        );
-    }
+    /*
+     * Store only the immediately previous accepted click XPath.
+     *
+     * A -> A
+     *
+     * The second A is rejected.
+     *
+     * A -> B -> A
+     *
+     * All three are accepted.
+     */
+    let lastAcceptedClickXPath = "";
 
     function pushAcceptedAction(action) {
         const cleanedAction =
@@ -812,33 +767,11 @@ function createClickSignature(
      * listeners.js.
      *
      * No XPath is recalculated from the post-click DOM here.
+     *
+     * Only an immediately repeated click XPath is suppressed. An XPath is
+     * allowed again after a different click XPath has been accepted.
      */
     function commitClickJob(job) {
-        const clickId =
-            job?.clickId ??
-            job?.capturedAction
-                ?.clickId ??
-            null;
-
-        if (
-            clickId !== null &&
-            acceptedClickIds.has(
-                clickId
-            )
-        ) {
-            return {
-                accepted: false,
-                duplicate: true,
-
-                sequence:
-                    job?.sequence ??
-                    null,
-
-                reason:
-                    "Duplicate clickId suppressed"
-            };
-        }
-
         const built =
             buildAcceptedClickAction(
                 job
@@ -854,16 +787,28 @@ function createClickSignature(
             };
         }
 
-        const signature =
-            createClickSignature(
+        const clickXPath =
+            getClickXPathComparisonValue(
                 job,
                 built
             );
 
+        if (!clickXPath) {
+            return {
+                accepted: false,
+
+                sequence:
+                    job?.sequence ??
+                    null,
+
+                reason:
+                    "Click contains no XPath for consecutive comparison"
+            };
+        }
+
         if (
-            isDuplicatePhysicalClick(
-                signature
-            )
+            lastAcceptedClickXPath ===
+            clickXPath
         ) {
             return {
                 accepted: false,
@@ -874,18 +819,13 @@ function createClickSignature(
                     null,
 
                 reason:
-                    "Duplicate physical click suppressed"
+                    "Consecutive duplicate click XPath suppressed"
             };
         }
 
-        if (clickId !== null) {
-            acceptedClickIds.add(
-                clickId
-            );
-        }
-
         /*
-         * Do not let a preceding non-click action suppress this click.
+         * Do not let a preceding non-click action suppress this click through
+         * the general action-key deduplication path.
          */
         lastAcceptedActionKey =
             null;
@@ -907,6 +847,12 @@ function createClickSignature(
                     "Click action could not be committed"
             };
         }
+
+        /*
+         * Update only after the action was successfully committed.
+         */
+        lastAcceptedClickXPath =
+            clickXPath;
 
         return {
             accepted: true,

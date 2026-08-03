@@ -90,11 +90,18 @@ function injectListeners() {
   );
 
   /*
-   * One shared Map for XPath keys.
+   * Store only the immediately previous click XPath.
    *
-   * Map.has() and Map.set() are average O(1).
+   * A -> A
+   *
+   * The second A is rejected.
+   *
+   * A -> B -> A
+   *
+   * All three are accepted because only consecutive duplicate XPaths are
+   * rejected.
    */
-  function getClickXPathMapOwner() {
+  function getClickXPathStateOwner() {
     try {
       const topWindow =
         window.top;
@@ -106,28 +113,35 @@ function injectListeners() {
 
       return topWindow;
     } catch {
+      /*
+       * A cross-origin frame cannot directly share variables with the top
+       * frame. Keep its consecutive-click state inside that frame.
+       */
       return window;
     }
   }
 
-  const clickXPathMapOwner =
-    getClickXPathMapOwner();
+  const clickXPathStateOwner =
+    getClickXPathStateOwner();
 
   if (
-    !(
-      clickXPathMapOwner
-        .__PW_RECORDED_CLICK_XPATHS__
-      instanceof Map
+    !Object.prototype.hasOwnProperty.call(
+      clickXPathStateOwner,
+      "__PW_LAST_RECORDED_CLICK_XPATH__"
     )
   ) {
-    clickXPathMapOwner
-      .__PW_RECORDED_CLICK_XPATHS__ =
-      new Map();
+    clickXPathStateOwner
+      .__PW_LAST_RECORDED_CLICK_XPATH__ =
+      "";
   }
 
-  const recordedClickXPaths =
-    clickXPathMapOwner
-      .__PW_RECORDED_CLICK_XPATHS__;
+  function getLastRecordedClickXPath() {
+    return String(
+      clickXPathStateOwner
+        .__PW_LAST_RECORDED_CLICK_XPATH__ ||
+      ""
+    );
+  }
 
   function reserveClickXPath(
     xpathKey
@@ -137,29 +151,21 @@ function injectListeners() {
     }
 
     /*
-     * Average O(1) lookup.
+     * Reject only an immediately repeated click XPath.
      */
     if (
-      recordedClickXPaths.has(
-        xpathKey
-      )
+      getLastRecordedClickXPath() ===
+      xpathKey
     ) {
       return false;
     }
 
     /*
-     * Reserve before sending the action.
+     * Replace the previous value immediately.
      */
-    recordedClickXPaths.set(
-      xpathKey,
-      {
-        status:
-          "reserved",
-
-        createdAt:
-          Date.now(),
-      }
-    );
+    clickXPathStateOwner
+      .__PW_LAST_RECORDED_CLICK_XPATH__ =
+      xpathKey;
 
     return true;
   }
@@ -167,27 +173,18 @@ function injectListeners() {
   function markClickXPathSaved(
     xpathKey
   ) {
-    const current =
-      recordedClickXPaths.get(
+    /*
+     * No Map entry or status update is required.
+     *
+     * The XPath already remains stored as the immediately previous click.
+     */
+    if (
+      !xpathKey ||
+      getLastRecordedClickXPath() !==
         xpathKey
-      );
-
-    if (!current) {
+    ) {
       return;
     }
-
-    recordedClickXPaths.set(
-      xpathKey,
-      {
-        ...current,
-
-        status:
-          "saved",
-
-        savedAt:
-          Date.now(),
-      }
-    );
   }
 
   function releaseClickXPath(
@@ -197,9 +194,20 @@ function injectListeners() {
       return;
     }
 
-    recordedClickXPaths.delete(
+    /*
+     * Clear only when this failed operation still owns the current value.
+     *
+     * This prevents an older asynchronous failure from clearing a newer
+     * click XPath.
+     */
+    if (
+      getLastRecordedClickXPath() ===
       xpathKey
-    );
+    ) {
+      clickXPathStateOwner
+        .__PW_LAST_RECORDED_CLICK_XPATH__ =
+        "";
+    }
   }
 
   function omitNullFields(value) {
@@ -2578,44 +2586,15 @@ function injectListeners() {
           return;
         }
 
-        const action =
-          event.data.data;
-
-        if (
-          action?.action ===
-            "click" &&
-          action?.xpathKey
-        ) {
-          if (
-            recordedClickXPaths.has(
-              action.xpathKey
-            )
-          ) {
-            console.warn(
-              [
-                "[recorder]",
-                "Duplicate forwarded XPath ignored.",
-                `xpath=${action.xpathKey}`,
-              ].join(" ")
-            );
-
-            return;
-          }
-
-          recordedClickXPaths.set(
-            action.xpathKey,
-            {
-              status:
-                "forwarded",
-
-              createdAt:
-                Date.now(),
-            }
-          );
-        }
-
+        /*
+         * Do not perform the consecutive-XPath check again here.
+         *
+         * The originating frame already reserved the XPath before forwarding
+         * the action. Checking it again would reject the same action during
+         * forwarding.
+         */
         window.__captureAction(
-          action
+          event.data.data
         );
       }
     );
@@ -3448,7 +3427,7 @@ function injectListeners() {
   }
 
   /*
-   * This is the requested dedupe key.
+   * This is the consecutive-click comparison key.
    *
    * When an HTML id exists:
    *
@@ -3717,7 +3696,7 @@ function injectListeners() {
         }
 
         /*
-         * Build the ID-based XPath key.
+         * Build the XPath used for consecutive duplicate comparison.
          */
         xpathKey =
           createClickXPathKey(
@@ -3733,9 +3712,8 @@ function injectListeners() {
         }
 
         /*
-         * Average O(1).
-         *
-         * Once the XPath exists in the Map, do not include it again.
+         * Reject only when this XPath is identical to the immediately
+         * previous click XPath.
          */
         if (
           !reserveClickXPath(
@@ -3745,7 +3723,7 @@ function injectListeners() {
           console.warn(
             [
               "[click-recorder]",
-              "XPath already exists in Map. Click ignored.",
+              "Consecutive duplicate XPath ignored.",
               `xpath=${xpathKey}`,
             ].join(" ")
           );
@@ -3785,7 +3763,7 @@ function injectListeners() {
           ++actionSequence;
 
         /*
-         * The click ID is also based on the XPath Map key.
+         * Retain the XPath-based click ID contract.
          */
         const clickId =
           xpathKey;
@@ -3918,7 +3896,7 @@ function injectListeners() {
                 console.warn(
                   [
                     "[click-recorder]",
-                    "Backend rejected duplicate XPath.",
+                    "Backend rejected click as duplicate.",
                     `xpath=${xpathKey}`,
                   ].join(" ")
                 );

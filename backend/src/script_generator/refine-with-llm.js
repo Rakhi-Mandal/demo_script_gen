@@ -15,6 +15,167 @@ dotenv.config({ path: path.join(ROOT, ".env") });
 
 const llmUsageSummary = buildUsageSummary();
 
+/**
+ * Temporarily removes every generated:
+ *
+ * - locator.check()
+ * - expect(locator).toBeChecked()
+ * - expect(locator).not.toBeChecked()
+ *
+ * It supports both one-line and multiline statements.
+ *
+ * TRACE XPath click statements remain untouched.
+ */
+function removeCheckAndToBeCheckedStatements(
+  scriptText
+) {
+  const lines =
+    String(scriptText || "")
+      .split(/\r?\n/);
+
+  const output = [];
+
+  let index = 0;
+
+  while (index < lines.length) {
+    const currentLine =
+      lines[index];
+
+    const trimmed =
+      currentLine.trim();
+
+    /*
+     * Generated Playwright action/assertion statements
+     * normally begin with one of these forms:
+     *
+     * await page...
+     * await expect(...)
+     * expect(...)
+     * page...
+     * frame...
+     * locatorVariable...
+     */
+    const canStartStatement =
+      /^(?:await\b|expect\s*\(|(?:page|frame)\.|[A-Za-z_$][\w$]*\.)/.test(
+        trimmed
+      );
+
+    if (!canStartStatement) {
+      output.push(currentLine);
+      index += 1;
+      continue;
+    }
+
+    const statementLines = [
+      currentLine,
+    ];
+
+    let statementEnd =
+      index;
+
+    /*
+     * Collect the complete statement until its terminating
+     * semicolon. This handles multiline locator chains:
+     *
+     * await page
+     *   .locator(...)
+     *   .check();
+     *
+     * await expect(
+     *   page.locator(...)
+     * ).toBeChecked();
+     */
+    while (
+      statementEnd + 1 <
+        lines.length &&
+      !/;\s*$/.test(
+        statementLines[
+          statementLines.length - 1
+        ].trim()
+      )
+    ) {
+      statementEnd += 1;
+
+      statementLines.push(
+        lines[statementEnd]
+      );
+
+      /*
+       * Avoid consuming the rest of the test if an
+       * incomplete model statement has no semicolon.
+       */
+      if (
+        statementLines.length >
+        100
+      ) {
+        break;
+      }
+    }
+
+    const statementText =
+      statementLines.join("\n");
+
+    const containsCheck =
+      /\.\s*check\s*\(/.test(
+        statementText
+      );
+
+    const containsCheckedAssertion =
+      /\.\s*toBeChecked\s*\(/.test(
+        statementText
+      );
+
+    if (
+      containsCheck ||
+      containsCheckedAssertion
+    ) {
+      index =
+        statementEnd + 1;
+
+      continue;
+    }
+
+    output.push(
+      ...statementLines
+    );
+
+    index =
+      statementEnd + 1;
+  }
+
+  return output
+    .join("\n")
+    .replace(
+      /\n[ \t]*\n[ \t]*\n+/g,
+      "\n\n"
+    );
+}
+
+function assertNoCheckOrToBeChecked(
+  scriptText
+) {
+  const text =
+    String(scriptText || "");
+
+  if (
+    /\.\s*check\s*\(/.test(text)
+  ) {
+    throw new Error(
+      "Generated script still contains a .check() call."
+    );
+  }
+
+  if (
+    /\.\s*toBeChecked\s*\(/.test(
+      text
+    )
+  ) {
+    throw new Error(
+      "Generated script still contains a toBeChecked() assertion."
+    );
+  }
+}
+
 function getScriptGeneratorPrompt() {
   const promptPath = path.join(
     ROOT,
@@ -23,24 +184,30 @@ function getScriptGeneratorPrompt() {
     "script_refine_prompt.py"
   );
 
-  const promptSource = loadFile(promptPath);
-  const tripleQuoteMatch = promptSource.match(
-    /return\s+"""([\s\S]*?)"""/
-  );
+  const promptSource =
+    loadFile(promptPath);
+
+  const tripleQuoteMatch =
+    promptSource.match(
+      /return\s+"""([\s\S]*?)"""/
+    );
 
   if (tripleQuoteMatch) {
-    return tripleQuoteMatch[1].trim();
+    return tripleQuoteMatch[1]
+      .trim();
   }
 
-  const singleQuoteMatch = promptSource.match(
-    /return\s+\(\s*((?:"(?:[^"\\]|\\.)*"\s*)+)\)/
-  );
+  const singleQuoteMatch =
+    promptSource.match(
+      /return\s+\(\s*((?:"(?:[^"\\]|\\.)*"\s*)+)\)/
+    );
 
   if (singleQuoteMatch) {
     const parts = [
-      ...singleQuoteMatch[1].matchAll(
-        /"((?:[^"\\]|\\.)*)"/g
-      ),
+      ...singleQuoteMatch[1]
+        .matchAll(
+          /"((?:[^"\\]|\\.)*)"/g
+        ),
     ].map((match) =>
       match[1]
         .replace(/\\n/g, "\n")
@@ -48,7 +215,9 @@ function getScriptGeneratorPrompt() {
         .replace(/\\\\/g, "\\")
     );
 
-    return parts.join("").trim();
+    return parts
+      .join("")
+      .trim();
   }
 
   throw new Error(
@@ -64,13 +233,17 @@ function getHealWrapperPrompt() {
     "heal_wrapper_prompt.py"
   );
 
-  const promptSource = loadFile(promptPath);
-  const tripleQuoteMatch = promptSource.match(
-    /return\s+"""([\s\S]*?)"""/
-  );
+  const promptSource =
+    loadFile(promptPath);
+
+  const tripleQuoteMatch =
+    promptSource.match(
+      /return\s+"""([\s\S]*?)"""/
+    );
 
   if (tripleQuoteMatch) {
-    return tripleQuoteMatch[1].trim();
+    return tripleQuoteMatch[1]
+      .trim();
   }
 
   throw new Error(
@@ -78,21 +251,32 @@ function getHealWrapperPrompt() {
   );
 }
 
-function extractHealedSpecBetweenSentinels(rawOutput) {
-  const text = String(rawOutput || "").trim();
-  const startTag = "<<<UPDATED_TEST>>>";
-  const endTag = "<<<END_UPDATED_TEST>>>";
+function extractHealedSpecBetweenSentinels(
+  rawOutput
+) {
+  const text =
+    String(rawOutput || "")
+      .trim();
+
+  const startTag =
+    "<<<UPDATED_TEST>>>";
+
+  const endTag =
+    "<<<END_UPDATED_TEST>>>";
 
   if (
     text.includes(startTag) &&
     text.includes(endTag)
   ) {
-    const between = text
-      .split(startTag, 2)[1]
-      .split(endTag, 2)[0]
-      .trim();
+    const between =
+      text
+        .split(startTag, 2)[1]
+        .split(endTag, 2)[0]
+        .trim();
 
-    return cleanLlmOutput(between);
+    return cleanLlmOutput(
+      between
+    );
   }
 
   return cleanLlmOutput(text);
@@ -100,13 +284,21 @@ function extractHealedSpecBetweenSentinels(rawOutput) {
 
 const HEALED_TEMPLATE_OVERRIDES = [];
 
-function findMatchingHealedTemplate(plainPath) {
-  const baseName = path.basename(plainPath);
+function findMatchingHealedTemplate(
+  plainPath
+) {
+  const baseName =
+    path.basename(plainPath);
 
-  for (const override of HEALED_TEMPLATE_OVERRIDES) {
+  for (
+    const override of
+    HEALED_TEMPLATE_OVERRIDES
+  ) {
     if (
       override.match.test(baseName) &&
-      fs.existsSync(override.templatePath)
+      fs.existsSync(
+        override.templatePath
+      )
     ) {
       return override;
     }
@@ -115,15 +307,27 @@ function findMatchingHealedTemplate(plainPath) {
   return null;
 }
 
-function buildHealedOutputPath(plainOutputPath) {
-  const plainPath = path.resolve(plainOutputPath);
-  const baseName = path.basename(plainPath);
-  const suiteDir = path.dirname(plainPath);
-  const suiteName = path
-    .basename(suiteDir)
-    .toLowerCase();
+function buildHealedOutputPath(
+  plainOutputPath
+) {
+  const plainPath =
+    path.resolve(
+      plainOutputPath
+    );
 
-  const projectDir = path.dirname(suiteDir);
+  const baseName =
+    path.basename(plainPath);
+
+  const suiteDir =
+    path.dirname(plainPath);
+
+  const suiteName =
+    path
+      .basename(suiteDir)
+      .toLowerCase();
+
+  const projectDir =
+    path.dirname(suiteDir);
 
   const healedDir =
     suiteName === "sanity" ||
@@ -133,29 +337,46 @@ function buildHealedOutputPath(plainOutputPath) {
           "healed",
           suiteName
         )
-      : path.join(projectDir, "healed");
+      : path.join(
+          projectDir,
+          "healed"
+        );
 
   let healedName;
 
-  if (baseName.endsWith(".spec.js")) {
-    const stem = baseName.slice(
-      0,
-      -".spec.js".length
-    );
+  if (
+    baseName.endsWith(
+      ".spec.js"
+    )
+  ) {
+    const stem =
+      baseName.slice(
+        0,
+        -".spec.js".length
+      );
 
-    healedName = `${stem}.healed.spec.js`;
-  } else if (baseName.endsWith(".js")) {
-    const stem = baseName.slice(
-      0,
-      -".js".length
-    );
+    healedName =
+      `${stem}.healed.spec.js`;
+  } else if (
+    baseName.endsWith(".js")
+  ) {
+    const stem =
+      baseName.slice(
+        0,
+        -".js".length
+      );
 
-    healedName = `${stem}.healed.js`;
+    healedName =
+      `${stem}.healed.js`;
   } else {
-    healedName = `${baseName}.healed`;
+    healedName =
+      `${baseName}.healed`;
   }
 
-  return path.join(healedDir, healedName);
+  return path.join(
+    healedDir,
+    healedName
+  );
 }
 
 function rewriteHealedImports(
@@ -171,10 +392,14 @@ async function generateAndWriteHealedSpec(
   plainOutputPath
 ) {
   const healedPath =
-    buildHealedOutputPath(plainOutputPath);
+    buildHealedOutputPath(
+      plainOutputPath
+    );
 
   const templateOverride =
-    findMatchingHealedTemplate(plainOutputPath);
+    findMatchingHealedTemplate(
+      plainOutputPath
+    );
 
   if (
     templateOverride &&
@@ -185,14 +410,23 @@ async function generateAndWriteHealedSpec(
       `${templateOverride.templatePath}`
     );
 
-    const templateContent = fs.readFileSync(
-      templateOverride.templatePath,
-      "utf8"
+    const templateContent =
+      removeCheckAndToBeCheckedStatements(
+        fs.readFileSync(
+          templateOverride.templatePath,
+          "utf8"
+        )
+      );
+
+    assertNoCheckOrToBeChecked(
+      templateContent
     );
 
     fs.mkdirSync(
       path.dirname(healedPath),
-      { recursive: true }
+      {
+        recursive: true,
+      }
     );
 
     fs.writeFileSync(
@@ -221,7 +455,8 @@ async function generateAndWriteHealedSpec(
   const userPrompt =
     "Here is a clean Playwright spec. " +
     "Convert it to a heal-wrapped version " +
-    "per the rules.\n\n" +
+    "per the rules. Do not add .check() calls " +
+    "or toBeChecked() assertions.\n\n" +
     `SPEC:\n${plainSpecText}`;
 
   const fullPrompt =
@@ -234,7 +469,10 @@ async function generateAndWriteHealedSpec(
   let rawHealed;
 
   try {
-    rawHealed = await callGroq(fullPrompt);
+    rawHealed =
+      await callGroq(
+        fullPrompt
+      );
   } catch (error) {
     console.warn(
       `Heal-wrapped generation failed: ` +
@@ -281,9 +519,25 @@ async function generateAndWriteHealedSpec(
         "'../../fixtures/"
       );
 
+  /*
+   * The heal-wrapper model can independently invent
+   * check()/toBeChecked() lines. Remove them again
+   * before writing the healed spec.
+   */
+  healedWithFixedImports =
+    removeCheckAndToBeCheckedStatements(
+      healedWithFixedImports
+    );
+
+  assertNoCheckOrToBeChecked(
+    healedWithFixedImports
+  );
+
   fs.mkdirSync(
     path.dirname(healedPath),
-    { recursive: true }
+    {
+      recursive: true,
+    }
   );
 
   fs.writeFileSync(
@@ -307,8 +561,13 @@ function parseArgs(argv) {
       continue;
     }
 
-    const [key, ...rest] =
-      arg.slice(2).split("=");
+    const [
+      key,
+      ...rest
+    ] =
+      arg
+        .slice(2)
+        .split("=");
 
     args[key] =
       rest.length > 0
@@ -317,16 +576,20 @@ function parseArgs(argv) {
   }
 
   if (
-    Object.prototype.hasOwnProperty.call(
-      args,
-      "help"
-    ) ||
-    Object.prototype.hasOwnProperty.call(
-      args,
-      "h"
-    )
+    Object.prototype
+      .hasOwnProperty.call(
+        args,
+        "help"
+      ) ||
+    Object.prototype
+      .hasOwnProperty.call(
+        args,
+        "h"
+      )
   ) {
-    return { help: true };
+    return {
+      help: true,
+    };
   }
 
   if (
@@ -356,52 +619,65 @@ function printHelp() {
   );
 }
 
-function resolveFromRoot(filePath) {
-  return path.isAbsolute(filePath)
+function resolveFromRoot(
+  filePath
+) {
+  return path.isAbsolute(
+    filePath
+  )
     ? filePath
-    : path.resolve(ROOT, filePath);
+    : path.resolve(
+        ROOT,
+        filePath
+      );
 }
 
 function loadFile(filePath) {
-  return fs.readFileSync(filePath, "utf8");
+  return fs.readFileSync(
+    filePath,
+    "utf8"
+  );
 }
 
-const URL_LIKE_KEYS = new Set([
-  "url",
-  "href",
-  "src",
-  "actionurl",
-  "redirecturl",
-  "website",
-]);
+const URL_LIKE_KEYS =
+  new Set([
+    "url",
+    "href",
+    "src",
+    "actionurl",
+    "redirecturl",
+    "website",
+  ]);
 
-const TEXT_LIKE_KEYS = new Set([
-  "value",
-  "text",
-  "input",
-  "typedtext",
-  "placeholdervalue",
-  "label",
-  "title",
-  "name",
-]);
+const TEXT_LIKE_KEYS =
+  new Set([
+    "value",
+    "text",
+    "input",
+    "typedtext",
+    "placeholdervalue",
+    "label",
+    "title",
+    "name",
+  ]);
 
-const STRUCTURAL_TRACE_KEYS = new Set([
-  "selector",
-  "locator",
-  "locatorhint",
-  "locatorcode",
-  "elementkey",
-  "id",
-  "name",
-  "tagname",
-  "type",
-  "role",
-  "arialabel",
-  "datalabel",
-  "placeholder",
-  "title",
-]);
+const STRUCTURAL_TRACE_KEYS =
+  new Set([
+    "selector",
+    "locator",
+    "locatorhint",
+    "locatorcode",
+    "elementkey",
+    "id",
+    "name",
+    "tagname",
+    "type",
+    "role",
+    "arialabel",
+    "datalabel",
+    "placeholder",
+    "title",
+  ]);
 
 const SENSITIVE_KEY_PATTERN =
   /(password|pass|token|secret|authorization|auth|cookie|session|otp|postal|zip|phone|mobile|email|user\s*name|username|user|card|credit|cc|api[_-]?key|apikey)/i;
@@ -419,12 +695,13 @@ const DATA_FIELDS = [
 ];
 
 function titleCaseToken(value) {
-  const text = String(value || "")
-    .replace(
-      /[^a-zA-Z0-9]+/g,
-      " "
-    )
-    .trim();
+  const text =
+    String(value || "")
+      .replace(
+        /[^a-zA-Z0-9]+/g,
+        " "
+      )
+      .trim();
 
   if (!text) {
     return "";
@@ -435,65 +712,99 @@ function titleCaseToken(value) {
     .filter(Boolean)
     .map(
       (token) =>
-        token.charAt(0).toUpperCase() +
+        token
+          .charAt(0)
+          .toUpperCase() +
         token.slice(1)
     )
     .join("");
 }
 
-function selectorKeyBase(context) {
+function selectorKeyBase(
+  context
+) {
   const text =
-    String(context || "").trim();
+    String(context || "")
+      .trim();
 
   if (!text) {
     return "";
   }
 
-  const attrMatch = text.match(
-    /\[(?:data-testid|data-test|data-cy|data-label|aria-label|name|placeholder|title)=["']([^"']+)["']\]/i
-  );
+  const attrMatch =
+    text.match(
+      /\[(?:data-testid|data-test|data-cy|data-label|aria-label|name|placeholder|title)=["']([^"']+)["']\]/i
+    );
 
-  const roleNameMatch = text.match(
-    /name\s*:\s*['"`]([^'"`]+)['"`]/i
-  );
+  const roleNameMatch =
+    text.match(
+      /name\s*:\s*['"`]([^'"`]+)['"`]/i
+    );
 
-  const textMatch = text.match(
-    /(?:text|getByText)\(\s*['"`]([^'"`]+)['"`]/i
-  );
+  const textMatch =
+    text.match(
+      /(?:text|getByText)\(\s*['"`]([^'"`]+)['"`]/i
+    );
 
   const idMatch =
-    text.match(/#([A-Za-z0-9_-]+)/) ||
+    text.match(
+      /#([A-Za-z0-9_-]+)/
+    ) ||
     text.match(
       /\bid\s*[:=]\s*['"`]?([A-Za-z0-9_-]+)/i
     );
 
   const idValue =
-    idMatch && idMatch[1];
+    idMatch &&
+    idMatch[1];
 
   const source =
-    (attrMatch && attrMatch[1]) ||
-    (roleNameMatch && roleNameMatch[1]) ||
-    (textMatch && textMatch[1]) ||
+    (
+      attrMatch &&
+      attrMatch[1]
+    ) ||
+    (
+      roleNameMatch &&
+      roleNameMatch[1]
+    ) ||
+    (
+      textMatch &&
+      textMatch[1]
+    ) ||
     (
       idValue &&
-      !isGeneratedIdValue(idValue)
+      !isGeneratedIdValue(
+        idValue
+      )
         ? idValue
         : ""
     ) ||
     text;
 
   const base =
-    titleCaseToken(source).slice(0, 60);
+    titleCaseToken(
+      source
+    ).slice(
+      0,
+      60
+    );
 
   return base
-    ? base.charAt(0).toLowerCase() +
-      base.slice(1)
+    ? (
+        base
+          .charAt(0)
+          .toLowerCase() +
+        base.slice(1)
+      )
     : "";
 }
 
-function isUsefulIdentityKey(base) {
+function isUsefulIdentityKey(
+  base
+) {
   const text =
-    String(base || "").trim();
+    String(base || "")
+      .trim();
 
   if (
     !text ||
@@ -502,9 +813,14 @@ function isUsefulIdentityKey(base) {
     return false;
   }
 
-  const lower = text.toLowerCase();
+  const lower =
+    text.toLowerCase();
 
-  if (isGeneratedIdValue(text)) {
+  if (
+    isGeneratedIdValue(
+      text
+    )
+  ) {
     return false;
   }
 
@@ -524,47 +840,66 @@ function dataKeyForFieldContext(
   context = ""
 ) {
   const base =
-    selectorKeyBase(context);
+    selectorKeyBase(
+      context
+    );
 
   if (!base) {
     return field;
   }
 
-  if (isUsefulIdentityKey(base)) {
+  if (
+    isUsefulIdentityKey(
+      base
+    )
+  ) {
     return base;
   }
 
   const fieldToken =
     field === "cardNumber"
       ? "CardNumber"
-      : titleCaseToken(field);
+      : titleCaseToken(
+          field
+        );
 
   const lowerBase =
     base.toLowerCase();
 
   const lowerField =
-    String(field || "").toLowerCase();
+    String(field || "")
+      .toLowerCase();
 
   if (
-    lowerBase.includes(lowerField) ||
+    lowerBase.includes(
+      lowerField
+    ) ||
     (
       field === "cardNumber" &&
-      /card|credit|cc/.test(lowerBase)
+      /card|credit|cc/.test(
+        lowerBase
+      )
     )
   ) {
     return base;
   }
 
-  return `${base}${fieldToken}`;
+  return (
+    `${base}` +
+    `${fieldToken}`
+  );
 }
 
-function placeholderTokenForField(field) {
+function placeholderTokenForField(
+  field
+) {
   return field === "cardNumber"
     ? "CARD"
     : String(field || "")
         .replace(
           /[A-Z]/g,
-          (letter) => `_${letter}`
+          (letter) =>
+            `_${letter}`
         )
         .toUpperCase();
 }
@@ -580,29 +915,35 @@ function buildMaskedPlaceholder(
     );
 
   const fieldToken =
-    placeholderTokenForField(field);
+    placeholderTokenForField(
+      field
+    );
 
   if (
     !base ||
     base === field
   ) {
-    return `[MASKED_${fieldToken}]`;
+    return (
+      `[MASKED_` +
+      `${fieldToken}]`
+    );
   }
 
-  const contextToken = String(base)
-    .replace(
-      /([a-z0-9])([A-Z])/g,
-      "$1_$2"
-    )
-    .replace(
-      /[^a-zA-Z0-9]+/g,
-      "_"
-    )
-    .replace(
-      /^_+|_+$/g,
-      ""
-    )
-    .toUpperCase();
+  const contextToken =
+    String(base)
+      .replace(
+        /([a-z0-9])([A-Z])/g,
+        "$1_$2"
+      )
+      .replace(
+        /[^a-zA-Z0-9]+/g,
+        "_"
+      )
+      .replace(
+        /^_+|_+$/g,
+        ""
+      )
+      .toUpperCase();
 
   return (
     `[MASKED_${fieldToken}_` +
@@ -610,7 +951,9 @@ function buildMaskedPlaceholder(
   );
 }
 
-function extractTraceContext(obj) {
+function extractTraceContext(
+  obj
+) {
   if (
     !obj ||
     typeof obj !== "object" ||
@@ -622,36 +965,63 @@ function extractTraceContext(obj) {
   return [
     obj.selector,
     obj.locator,
+
     obj.id
       ? `id=${obj.id}`
       : "",
+
     obj.name
       ? `name=${obj.name}`
       : "",
+
     obj.dataLabel
-      ? `data-label=${obj.dataLabel}`
+      ? (
+          `data-label=` +
+          `${obj.dataLabel}`
+        )
       : "",
+
     obj.ariaLabel
-      ? `aria-label=${obj.ariaLabel}`
+      ? (
+          `aria-label=` +
+          `${obj.ariaLabel}`
+        )
       : "",
+
     obj.placeholder
-      ? `placeholder=${obj.placeholder}`
+      ? (
+          `placeholder=` +
+          `${obj.placeholder}`
+        )
       : "",
   ]
     .filter(Boolean)
     .join(" ");
 }
 
-function isUsernameHintText(text) {
+function isUsernameHintText(
+  text
+) {
   const hints =
-    String(text || "").toLowerCase();
+    String(text || "")
+      .toLowerCase();
 
   return (
-    hints.includes("user-name") ||
-    hints.includes("username") ||
-    hints.includes("user name") ||
-    hints.includes("sign in name") ||
-    hints.includes("signinname")
+    hints.includes(
+      "user-name"
+    ) ||
+    hints.includes(
+      "username"
+    ) ||
+    hints.includes(
+      "user name"
+    ) ||
+    hints.includes(
+      "sign in name"
+    ) ||
+    hints.includes(
+      "signinname"
+    )
   );
 }
 
@@ -661,7 +1031,8 @@ function maskByKey(
   context = ""
 ) {
   const lowerKey =
-    String(key || "").toLowerCase();
+    String(key || "")
+      .toLowerCase();
 
   const text =
     String(value ?? "");
@@ -671,7 +1042,9 @@ function maskByKey(
   }
 
   if (
-    lowerKey.includes("password") ||
+    lowerKey.includes(
+      "password"
+    ) ||
     lowerKey === "pass"
   ) {
     return buildMaskedPlaceholder(
@@ -681,31 +1054,53 @@ function maskByKey(
   }
 
   if (
-    lowerKey.includes("authorization") ||
+    lowerKey.includes(
+      "authorization"
+    ) ||
     lowerKey === "auth"
   ) {
     return "[MASKED_AUTH]";
   }
 
-  if (lowerKey.includes("cookie")) {
+  if (
+    lowerKey.includes(
+      "cookie"
+    )
+  ) {
     return "[MASKED_COOKIE]";
   }
 
-  if (lowerKey.includes("token")) {
+  if (
+    lowerKey.includes(
+      "token"
+    )
+  ) {
     return "[MASKED_TOKEN]";
   }
 
-  if (lowerKey.includes("secret")) {
+  if (
+    lowerKey.includes(
+      "secret"
+    )
+  ) {
     return "[MASKED_SECRET]";
   }
 
-  if (lowerKey.includes("session")) {
+  if (
+    lowerKey.includes(
+      "session"
+    )
+  ) {
     return "[MASKED_SESSION]";
   }
 
   if (
-    lowerKey.includes("card") ||
-    lowerKey.includes("credit") ||
+    lowerKey.includes(
+      "card"
+    ) ||
+    lowerKey.includes(
+      "credit"
+    ) ||
     lowerKey === "cc"
   ) {
     return buildMaskedPlaceholder(
@@ -715,8 +1110,12 @@ function maskByKey(
   }
 
   if (
-    lowerKey.includes("postal") ||
-    lowerKey.includes("zip")
+    lowerKey.includes(
+      "postal"
+    ) ||
+    lowerKey.includes(
+      "zip"
+    )
   ) {
     return buildMaskedPlaceholder(
       "postalCode",
@@ -724,7 +1123,11 @@ function maskByKey(
     );
   }
 
-  if (lowerKey.includes("otp")) {
+  if (
+    lowerKey.includes(
+      "otp"
+    )
+  ) {
     return buildMaskedPlaceholder(
       "otp",
       context
@@ -732,8 +1135,12 @@ function maskByKey(
   }
 
   if (
-    lowerKey.includes("phone") ||
-    lowerKey.includes("mobile")
+    lowerKey.includes(
+      "phone"
+    ) ||
+    lowerKey.includes(
+      "mobile"
+    )
   ) {
     return buildMaskedPlaceholder(
       "phone",
@@ -741,7 +1148,11 @@ function maskByKey(
     );
   }
 
-  if (lowerKey.includes("email")) {
+  if (
+    lowerKey.includes(
+      "email"
+    )
+  ) {
     return buildMaskedPlaceholder(
       "email",
       context
@@ -749,8 +1160,12 @@ function maskByKey(
   }
 
   if (
-    lowerKey.includes("website") ||
-    lowerKey.includes("web")
+    lowerKey.includes(
+      "website"
+    ) ||
+    lowerKey.includes(
+      "web"
+    )
   ) {
     return buildMaskedPlaceholder(
       "website",
@@ -759,8 +1174,12 @@ function maskByKey(
   }
 
   if (
-    lowerKey.includes("user name") ||
-    lowerKey.includes("username") ||
+    lowerKey.includes(
+      "user name"
+    ) ||
+    lowerKey.includes(
+      "username"
+    ) ||
     lowerKey === "user"
   ) {
     return buildMaskedPlaceholder(
@@ -770,8 +1189,12 @@ function maskByKey(
   }
 
   if (
-    lowerKey.includes("api_key") ||
-    lowerKey.includes("apikey") ||
+    lowerKey.includes(
+      "api_key"
+    ) ||
+    lowerKey.includes(
+      "apikey"
+    ) ||
     lowerKey === "key"
   ) {
     return "[MASKED_API_KEY]";
@@ -780,7 +1203,9 @@ function maskByKey(
   return "[MASKED]";
 }
 
-function maskSensitiveText(value) {
+function maskSensitiveText(
+  value
+) {
   let text =
     String(value ?? "");
 
@@ -788,64 +1213,82 @@ function maskSensitiveText(value) {
     {
       pattern:
         /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
-      replacement: "[MASKED_EMAIL]",
+
+      replacement:
+        "[MASKED_EMAIL]",
     },
     {
       pattern:
         /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\b/gi,
-      replacement: "[MASKED_EMAIL]",
+
+      replacement:
+        "[MASKED_EMAIL]",
     },
     {
       pattern:
         /\b(?:\d[ -]?){13,19}\b/g,
-      replacement: "[MASKED_CARD]",
+
+      replacement:
+        "[MASKED_CARD]",
     },
     {
       pattern:
         /\b(?:\+?\d[\d\s-]{7,}\d)\b/g,
-      replacement: "[MASKED_PHONE]",
+
+      replacement:
+        "[MASKED_PHONE]",
     },
     {
       pattern:
         /\b\d{4,8}\b/g,
-      replacement: (match) =>
-        /^\d{4,6}$/.test(match)
-          ? "[MASKED_OTP]"
-          : match,
+
+      replacement:
+        (match) =>
+          /^\d{4,6}$/.test(
+            match
+          )
+            ? "[MASKED_OTP]"
+            : match,
     },
     {
       pattern:
         /(?<=password\s*[:=]\s*['"`])[^'"`\n]+/gi,
+
       replacement:
         "[MASKED_PASSWORD]",
     },
     {
       pattern:
         /(?<=pass\s*[:=]\s*['"`])[^'"`\n]+/gi,
+
       replacement:
         "[MASKED_PASSWORD]",
     },
     {
       pattern:
         /(?<=token\s*[:=]\s*['"`])[^'"`\n]+/gi,
+
       replacement:
         "[MASKED_TOKEN]",
     },
     {
       pattern:
         /(?<=api[_-]?key\s*[:=]\s*['"`])[^'"`\n]+/gi,
+
       replacement:
         "[MASKED_API_KEY]",
     },
     {
       pattern:
         /(?<=secret\s*[:=]\s*['"`])[^'"`\n]+/gi,
+
       replacement:
         "[MASKED_SECRET]",
     },
     {
       pattern:
         /(?<=authorization\s*[:=]\s*['"`])[^'"`\n]+/gi,
+
       replacement:
         "[MASKED_AUTH]",
     },
@@ -857,24 +1300,30 @@ function maskSensitiveText(value) {
       replacement,
     } of replacements
   ) {
-    text = text.replace(
-      pattern,
-      replacement
-    );
+    text =
+      text.replace(
+        pattern,
+        replacement
+      );
   }
 
   return text;
 }
 
-function isHtmlSnippetValue(value) {
+function isHtmlSnippetValue(
+  value
+) {
   const text =
-    String(value ?? "").trim();
+    String(value ?? "")
+      .trim();
 
   if (!text) {
     return false;
   }
 
-  if (text.length < 20) {
+  if (
+    text.length < 20
+  ) {
     return false;
   }
 
@@ -883,7 +1332,9 @@ function isHtmlSnippetValue(value) {
   );
 }
 
-function maskUrlValue(rawUrl) {
+function maskUrlValue(
+  rawUrl
+) {
   if (
     !rawUrl ||
     typeof rawUrl !== "string"
@@ -892,7 +1343,8 @@ function maskUrlValue(rawUrl) {
   }
 
   try {
-    const url = new URL(rawUrl);
+    const url =
+      new URL(rawUrl);
 
     const sensitiveParams = [
       "password",
@@ -917,7 +1369,8 @@ function maskUrlValue(rawUrl) {
 
     for (
       const [key] of
-      url.searchParams.entries()
+      url.searchParams
+        .entries()
     ) {
       const lowerKey =
         key.toLowerCase();
@@ -926,10 +1379,18 @@ function maskUrlValue(rawUrl) {
         sensitiveParams.includes(
           lowerKey
         ) ||
-        lowerKey.startsWith("utm_") ||
-        lowerKey.includes("token") ||
-        lowerKey.includes("secret") ||
-        lowerKey.includes("session")
+        lowerKey.startsWith(
+          "utm_"
+        ) ||
+        lowerKey.includes(
+          "token"
+        ) ||
+        lowerKey.includes(
+          "secret"
+        ) ||
+        lowerKey.includes(
+          "session"
+        )
       ) {
         url.searchParams.set(
           key,
@@ -950,11 +1411,15 @@ function maskUrlValue(rawUrl) {
 
     return url.toString();
   } catch {
-    return maskSensitiveText(rawUrl);
+    return maskSensitiveText(
+      rawUrl
+    );
   }
 }
 
-function maskUrlForLlm(rawUrl) {
+function maskUrlForLlm(
+  rawUrl
+) {
   if (
     !rawUrl ||
     typeof rawUrl !== "string"
@@ -965,7 +1430,9 @@ function maskUrlForLlm(rawUrl) {
   return "[MASKED_URL]";
 }
 
-function getObjectSensitivityHint(obj) {
+function getObjectSensitivityHint(
+  obj
+) {
   if (
     !obj ||
     typeof obj !== "object" ||
@@ -993,7 +1460,8 @@ function getObjectSensitivityHint(obj) {
   ]
     .filter(
       (value) =>
-        typeof value === "string"
+        typeof value ===
+        "string"
     )
     .join(" ")
     .toLowerCase();
@@ -1002,114 +1470,193 @@ function getObjectSensitivityHint(obj) {
     return "";
   }
 
-  if (isUsernameHintText(hints)) {
+  if (
+    isUsernameHintText(
+      hints
+    )
+  ) {
     return "username";
   }
 
   if (
-    hints.includes("website") ||
-    hints.includes("web site")
+    hints.includes(
+      "website"
+    ) ||
+    hints.includes(
+      "web site"
+    )
   ) {
     return "website";
   }
 
-  if (hints.includes("email")) {
+  if (
+    hints.includes(
+      "email"
+    )
+  ) {
     return "email";
   }
 
   if (
-    hints.includes("card") ||
-    hints.includes("credit") ||
-    hints.includes("cc-number") ||
-    hints.includes("ccnum")
+    hints.includes(
+      "card"
+    ) ||
+    hints.includes(
+      "credit"
+    ) ||
+    hints.includes(
+      "cc-number"
+    ) ||
+    hints.includes(
+      "ccnum"
+    )
   ) {
     return "cardNumber";
   }
 
   if (
-    hints.includes("phone") ||
-    hints.includes("mobile") ||
-    hints.includes("tel")
+    hints.includes(
+      "phone"
+    ) ||
+    hints.includes(
+      "mobile"
+    ) ||
+    hints.includes(
+      "tel"
+    )
   ) {
     return "phone";
   }
 
   if (
-    hints.includes("password") ||
-    hints.includes("pass")
+    hints.includes(
+      "password"
+    ) ||
+    hints.includes(
+      "pass"
+    )
   ) {
     return "password";
   }
 
   if (
-    hints.includes("postal") ||
-    hints.includes("zip")
+    hints.includes(
+      "postal"
+    ) ||
+    hints.includes(
+      "zip"
+    )
   ) {
     return "postalCode";
   }
 
-  if (hints.includes("otp")) {
+  if (
+    hints.includes(
+      "otp"
+    )
+  ) {
     return "otp";
   }
 
   return "";
 }
 
-function getSensitivityHintFromText(text) {
+function getSensitivityHintFromText(
+  text
+) {
   const hints =
-    String(text || "").toLowerCase();
+    String(text || "")
+      .toLowerCase();
 
   if (!hints) {
     return "";
   }
 
-  if (isUsernameHintText(hints)) {
+  if (
+    isUsernameHintText(
+      hints
+    )
+  ) {
     return "username";
   }
 
   if (
-    hints.includes("website") ||
-    hints.includes("web site")
+    hints.includes(
+      "website"
+    ) ||
+    hints.includes(
+      "web site"
+    )
   ) {
     return "website";
   }
 
-  if (hints.includes("email")) {
+  if (
+    hints.includes(
+      "email"
+    )
+  ) {
     return "email";
   }
 
   if (
-    hints.includes("card") ||
-    hints.includes("credit") ||
-    hints.includes("cc-number") ||
-    hints.includes("ccnum")
+    hints.includes(
+      "card"
+    ) ||
+    hints.includes(
+      "credit"
+    ) ||
+    hints.includes(
+      "cc-number"
+    ) ||
+    hints.includes(
+      "ccnum"
+    )
   ) {
     return "cardNumber";
   }
 
   if (
-    hints.includes("phone") ||
-    hints.includes("mobile") ||
-    hints.includes("tel")
+    hints.includes(
+      "phone"
+    ) ||
+    hints.includes(
+      "mobile"
+    ) ||
+    hints.includes(
+      "tel"
+    )
   ) {
     return "phone";
   }
 
   if (
-    hints.includes("password") ||
-    hints.includes("pass")
+    hints.includes(
+      "password"
+    ) ||
+    hints.includes(
+      "pass"
+    )
   ) {
     return "password";
   }
 
   if (
-    hints.includes("postal") ||
-    hints.includes("zip")
+    hints.includes(
+      "postal"
+    ) ||
+    hints.includes(
+      "zip"
+    )
   ) {
     return "postalCode";
   }
 
-  if (hints.includes("otp")) {
+  if (
+    hints.includes(
+      "otp"
+    )
+  ) {
     return "otp";
   }
 
@@ -1121,7 +1668,8 @@ function valueLooksSensitiveByHint(
   hint
 ) {
   const text =
-    String(value ?? "").trim();
+    String(value ?? "")
+      .trim();
 
   if (
     !text ||
@@ -1172,7 +1720,8 @@ function shouldMaskTextValueByHint(
   parent
 ) {
   const lowerKey =
-    String(key || "").toLowerCase();
+    String(key || "")
+      .toLowerCase();
 
   if (
     ![
@@ -1185,15 +1734,21 @@ function shouldMaskTextValueByHint(
   }
 
   return Boolean(
-    getObjectSensitivityHint(parent)
+    getObjectSensitivityHint(
+      parent
+    )
   );
 }
 
-function sanitizeTraceForLlm(traceText) {
+function sanitizeTraceForLlm(
+  traceText
+) {
   try {
     const parsed =
       prepareTraceForLlm(
-        JSON.parse(traceText)
+        JSON.parse(
+          traceText
+        )
       );
 
     const sanitizeValue = (
@@ -1201,7 +1756,11 @@ function sanitizeTraceForLlm(traceText) {
       key = "",
       parent = null
     ) => {
-      if (Array.isArray(value)) {
+      if (
+        Array.isArray(
+          value
+        )
+      ) {
         return value.map(
           (item) =>
             sanitizeValue(
@@ -1214,15 +1773,19 @@ function sanitizeTraceForLlm(traceText) {
 
       if (
         value &&
-        typeof value === "object"
+        typeof value ===
+          "object"
       ) {
         return Object.fromEntries(
-          Object.entries(value).map(
+          Object.entries(
+            value
+          ).map(
             ([
               entryKey,
               entryValue,
             ]) => [
               entryKey,
+
               sanitizeValue(
                 entryValue,
                 entryKey,
@@ -1234,7 +1797,8 @@ function sanitizeTraceForLlm(traceText) {
       }
 
       if (
-        typeof value !== "string"
+        typeof value !==
+        "string"
       ) {
         return value;
       }
@@ -1243,46 +1807,58 @@ function sanitizeTraceForLlm(traceText) {
         key.toLowerCase();
 
       if (
-        lowerKey === "selector" &&
-        value.startsWith("xpath=")
+        lowerKey ===
+          "selector" &&
+        value.startsWith(
+          "xpath="
+        )
       ) {
         return value;
       }
 
       if (
-        lowerKey === "locatorcode"
+        lowerKey ===
+        "locatorcode"
       ) {
         return value;
       }
 
       if (
-        STRUCTURAL_TRACE_KEYS.has(
-          lowerKey
-        )
+        STRUCTURAL_TRACE_KEYS
+          .has(lowerKey)
       ) {
-        return maskSensitiveText(value);
-      }
-
-      if (
-        URL_LIKE_KEYS.has(lowerKey)
-      ) {
-        return maskUrlForLlm(value);
-      }
-
-      if (
-        SENSITIVE_KEY_PATTERN.test(
-          lowerKey
-        )
-      ) {
-        return maskByKey(
-          lowerKey,
-          value,
-          extractTraceContext(parent)
+        return maskSensitiveText(
+          value
         );
       }
 
       if (
-        TEXT_LIKE_KEYS.has(lowerKey)
+        URL_LIKE_KEYS.has(
+          lowerKey
+        )
+      ) {
+        return maskUrlForLlm(
+          value
+        );
+      }
+
+      if (
+        SENSITIVE_KEY_PATTERN
+          .test(lowerKey)
+      ) {
+        return maskByKey(
+          lowerKey,
+          value,
+          extractTraceContext(
+            parent
+          )
+        );
+      }
+
+      if (
+        TEXT_LIKE_KEYS.has(
+          lowerKey
+        )
       ) {
         const hint =
           getObjectSensitivityHint(
@@ -1298,7 +1874,9 @@ function sanitizeTraceForLlm(traceText) {
           return maskByKey(
             hint,
             value,
-            extractTraceContext(parent)
+            extractTraceContext(
+              parent
+            )
           );
         }
 
@@ -1312,14 +1890,20 @@ function sanitizeTraceForLlm(traceText) {
           return maskByKey(
             hint,
             value,
-            extractTraceContext(parent)
+            extractTraceContext(
+              parent
+            )
           );
         }
 
-        return maskSensitiveText(value);
+        return maskSensitiveText(
+          value
+        );
       }
 
-      return maskSensitiveText(value);
+      return maskSensitiveText(
+        value
+      );
     };
 
     return JSON.stringify(
@@ -1334,16 +1918,24 @@ function sanitizeTraceForLlm(traceText) {
   }
 }
 
-function compactActionValue(value) {
+function compactActionValue(
+  value
+) {
   return String(value ?? "")
-    .replace(/\s+/g, " ")
+    .replace(
+      /\s+/g,
+      " "
+    )
     .trim();
 }
 
-function actionElementIdentity(action) {
+function actionElementIdentity(
+  action
+) {
   const element =
     action &&
-    typeof action.element === "object"
+    typeof action.element ===
+      "object"
       ? action.element
       : {};
 
@@ -1358,35 +1950,45 @@ function actionElementIdentity(action) {
     element.placeholder,
     element.title,
   ]
-    .map(compactActionValue)
+    .map(
+      compactActionValue
+    )
     .join("|");
 }
 
-function actionFrameIdentity(action) {
+function actionFrameIdentity(
+  action
+) {
   if (
     !action ||
-    !Array.isArray(action.frameChain)
+    !Array.isArray(
+      action.frameChain
+    )
   ) {
     return "";
   }
 
   return action.frameChain
-    .map((frame) =>
-      compactActionValue(
-        frame?.selector ||
-        frame?.name ||
-        frame?.title ||
-        frame?.url
-      )
+    .map(
+      (frame) =>
+        compactActionValue(
+          frame?.selector ||
+          frame?.name ||
+          frame?.title ||
+          frame?.url
+        )
     )
     .filter(Boolean)
     .join(">");
 }
 
-function actionIdentity(action) {
+function actionIdentity(
+  action
+) {
   if (
     !action ||
-    typeof action !== "object"
+    typeof action !==
+      "object"
   ) {
     return "";
   }
@@ -1395,43 +1997,64 @@ function actionIdentity(action) {
     compactActionValue(
       action.action
     ).toLowerCase(),
+
     compactActionValue(
       action.selector
     ),
+
     compactActionValue(
       action.text
     ),
+
     compactActionValue(
       action.value
     ),
-    actionElementIdentity(action),
+
+    actionElementIdentity(
+      action
+    ),
+
     action.isIframe
       ? "iframe"
       : "page",
+
     action.isShadowDom
       ? "shadow"
       : "",
-    actionFrameIdentity(action),
+
+    actionFrameIdentity(
+      action
+    ),
   ].join("||");
 }
 
 function dedupeConsecutiveTraceActions(
   actions
 ) {
-  if (!Array.isArray(actions)) {
+  if (
+    !Array.isArray(
+      actions
+    )
+  ) {
     return actions;
   }
 
   const deduped = [];
-  let previousIdentity = "";
 
-  for (const action of actions) {
+  let previousIdentity =
+    "";
+
+  for (
+    const action of actions
+  ) {
     const actionKind =
       compactActionValue(
         action?.action
       ).toLowerCase();
 
-    if (actionKind === "click") {
+    if (
+      actionKind === "click"
+    ) {
       deduped.push(action);
       previousIdentity = "";
       continue;
@@ -1442,19 +2065,25 @@ function dedupeConsecutiveTraceActions(
 
     if (
       identity &&
-      identity === previousIdentity
+      identity ===
+        previousIdentity
     ) {
       continue;
     }
 
     deduped.push(action);
-    previousIdentity = identity;
+
+    previousIdentity =
+      identity;
   }
 
   return deduped;
 }
 
-function sameControl(left, right) {
+function sameControl(
+  left,
+  right
+) {
   if (
     !left ||
     !right
@@ -1466,24 +2095,40 @@ function sameControl(left, right) {
     compactActionValue(
       left.selector
     ),
-    actionElementIdentity(left),
+
+    actionElementIdentity(
+      left
+    ),
+
     left.isIframe
       ? "iframe"
       : "page",
-    actionFrameIdentity(left),
+
+    actionFrameIdentity(
+      left
+    ),
   ].join("||") === [
     compactActionValue(
       right.selector
     ),
-    actionElementIdentity(right),
+
+    actionElementIdentity(
+      right
+    ),
+
     right.isIframe
       ? "iframe"
       : "page",
-    actionFrameIdentity(right),
+
+    actionFrameIdentity(
+      right
+    ),
   ].join("||");
 }
 
-function isInputValueAction(action) {
+function isInputValueAction(
+  action
+) {
   const kind =
     compactActionValue(
       action?.action
@@ -1496,7 +2141,9 @@ function isInputValueAction(action) {
   ].includes(kind);
 }
 
-function isInputPrepAction(action) {
+function isInputPrepAction(
+  action
+) {
   const kind =
     compactActionValue(
       action?.action
@@ -1504,7 +2151,8 @@ function isInputPrepAction(action) {
 
   const element =
     action &&
-    typeof action.element === "object"
+    typeof action.element ===
+      "object"
       ? action.element
       : {};
 
@@ -1512,21 +2160,32 @@ function isInputPrepAction(action) {
     kind === "focus" &&
     compactActionValue(
       element.tagName
-    ).toLowerCase() === "input"
+    ).toLowerCase() ===
+      "input"
   );
 }
 
 function removeInputPreparationNoise(
   actions
 ) {
-  if (!Array.isArray(actions)) {
+  if (
+    !Array.isArray(
+      actions
+    )
+  ) {
     return actions;
   }
 
   const cleaned = [];
 
-  for (const action of actions) {
-    if (isInputValueAction(action)) {
+  for (
+    const action of actions
+  ) {
+    if (
+      isInputValueAction(
+        action
+      )
+    ) {
       while (
         cleaned.length &&
         isInputPrepAction(
@@ -1551,28 +2210,44 @@ function removeInputPreparationNoise(
   return cleaned;
 }
 
-function removeHtmlInputNoise(actions) {
-  if (!Array.isArray(actions)) {
+function removeHtmlInputNoise(
+  actions
+) {
+  if (
+    !Array.isArray(
+      actions
+    )
+  ) {
     return actions;
   }
 
   const cleaned = [];
-  let removedHtmlInput = null;
 
-  for (const action of actions) {
+  let removedHtmlInput =
+    null;
+
+  for (
+    const action of actions
+  ) {
     if (
-      isInputValueAction(action) &&
+      isInputValueAction(
+        action
+      ) &&
       isHtmlSnippetValue(
         action?.value
       )
     ) {
-      removedHtmlInput = action;
+      removedHtmlInput =
+        action;
+
       continue;
     }
 
     if (
       removedHtmlInput &&
-      isInputValueAction(action) &&
+      isInputValueAction(
+        action
+      ) &&
       sameControl(
         removedHtmlInput,
         action
@@ -1584,7 +2259,9 @@ function removeHtmlInputNoise(actions) {
       continue;
     }
 
-    removedHtmlInput = null;
+    removedHtmlInput =
+      null;
+
     cleaned.push(action);
   }
 
@@ -1609,15 +2286,23 @@ function removeHtmlInputNoise(actions) {
 function collapseConsecutiveTraceInputs(
   actions
 ) {
-  if (!Array.isArray(actions)) {
+  if (
+    !Array.isArray(
+      actions
+    )
+  ) {
     return actions;
   }
 
   const collapsed = [];
 
-  for (const action of actions) {
+  for (
+    const action of actions
+  ) {
     if (
-      isInputValueAction(action) &&
+      isInputValueAction(
+        action
+      ) &&
       collapsed.length
     ) {
       const previous =
@@ -1626,7 +2311,9 @@ function collapseConsecutiveTraceInputs(
         ];
 
       if (
-        isInputValueAction(previous) &&
+        isInputValueAction(
+          previous
+        ) &&
         sameControl(
           previous,
           action
@@ -1634,7 +2321,8 @@ function collapseConsecutiveTraceInputs(
       ) {
         collapsed[
           collapsed.length - 1
-        ] = action;
+        ] =
+          action;
 
         continue;
       }
@@ -1649,7 +2337,11 @@ function collapseConsecutiveTraceInputs(
 function normalizeTraceActions(
   actions
 ) {
-  if (!Array.isArray(actions)) {
+  if (
+    !Array.isArray(
+      actions
+    )
+  ) {
     return actions;
   }
 
@@ -1669,42 +2361,65 @@ function selectorFromAttribute(
   value
 ) {
   const text =
-    compactActionValue(value);
+    compactActionValue(
+      value
+    );
 
   return text
-    ? `[${name}=${JSON.stringify(text)}]`
+    ? (
+        `[${name}=` +
+        `${JSON.stringify(text)}]`
+      )
     : "";
 }
 
-function cssAttribute(name, value) {
+function cssAttribute(
+  name,
+  value
+) {
   const text =
-    compactActionValue(value);
+    compactActionValue(
+      value
+    );
 
   return text
-    ? `[${name}=${JSON.stringify(text)}]`
+    ? (
+        `[${name}=` +
+        `${JSON.stringify(text)}]`
+      )
     : "";
 }
 
-function isGeneratedIdValue(value) {
+function isGeneratedIdValue(
+  value
+) {
   const text =
-    compactActionValue(value);
+    compactActionValue(
+      value
+    );
 
   if (!text) {
     return false;
   }
 
-  if (/^\d/.test(text)) {
+  if (
+    /^\d/.test(text)
+  ) {
     return true;
   }
 
   if (
-    /^[a-f0-9_-]{8,}$/i.test(text) &&
+    /^[a-f0-9_-]{8,}$/i.test(
+      text
+    ) &&
     /\d/.test(text)
   ) {
     return true;
   }
 
-  if (/\d{3,}/.test(text)) {
+  if (
+    /\d{3,}/.test(text)
+  ) {
     return true;
   }
 
@@ -1713,29 +2428,53 @@ function isGeneratedIdValue(value) {
   );
 }
 
-function exactTextRegexLiteral(value) {
-  return `/^${escapeRegExp(compactActionValue(value))}$/`;
+function exactTextRegexLiteral(
+  value
+) {
+  return (
+    `/^` +
+    `${escapeRegExp(
+      compactActionValue(
+        value
+      )
+    )}` +
+    `$/`
+  );
 }
 
-function exactTextRegexObject(value) {
+function exactTextRegexObject(
+  value
+) {
   return (
     `{ hasText: ` +
     `${exactTextRegexLiteral(value)} }`
   );
 }
 
-function containsTextRegexLiteral(value) {
+function containsTextRegexLiteral(
+  value
+) {
   const text =
-    compactActionValue(value);
+    compactActionValue(
+      value
+    );
 
   return text
-    ? `/${escapeRegExp(text)}/i`
+    ? (
+        `/` +
+        `${escapeRegExp(text)}` +
+        `/i`
+      )
     : "/.*/";
 }
 
-function firstMeaningfulTextChunk(value) {
+function firstMeaningfulTextChunk(
+  value
+) {
   const text =
-    compactActionValue(value);
+    compactActionValue(
+      value
+    );
 
   if (!text) {
     return "";
@@ -1754,14 +2493,16 @@ function selectionRowLocatorForAction(
 ) {
   if (
     !action ||
-    typeof action !== "object"
+    typeof action !==
+      "object"
   ) {
     return "";
   }
 
   const element =
     action.element &&
-    typeof action.element === "object"
+    typeof action.element ===
+      "object"
       ? action.element
       : {};
 
@@ -1820,33 +2561,44 @@ function selectionRowLocatorForAction(
 
   return (
     `page.getByRole('row', { name: ` +
-    `${containsTextRegexLiteral(neighborText)} ` +
+    `${containsTextRegexLiteral(
+      neighborText
+    )} ` +
     `}).getByRole('${type}')`
   );
 }
 
-function recordedXPathForAction(action) {
+function recordedXPathForAction(
+  action
+) {
   if (
     !action ||
-    typeof action !== "object"
+    typeof action !==
+      "object"
   ) {
     return "";
   }
 
   const selector =
-    typeof action.selector === "string"
+    typeof action.selector ===
+      "string"
       ? action.selector
       : "";
 
-  return selector.startsWith("xpath=")
+  return selector.startsWith(
+    "xpath="
+  )
     ? selector
     : "";
 }
 
-function locatorHintForAction(action) {
+function locatorHintForAction(
+  action
+) {
   if (
     !action ||
-    typeof action !== "object"
+    typeof action !==
+      "object"
   ) {
     return "";
   }
@@ -1856,18 +2608,26 @@ function locatorHintForAction(action) {
       action.action
     ).toLowerCase();
 
-  if (actionKind === "click") {
+  if (
+    actionKind === "click"
+  ) {
     const xpath =
-      recordedXPathForAction(action);
+      recordedXPathForAction(
+        action
+      );
 
     return xpath
-      ? `locator(${JSON.stringify(xpath)})`
+      ? (
+          `locator(` +
+          `${JSON.stringify(xpath)})`
+        )
       : "";
   }
 
   const element =
     action.element &&
-    typeof action.element === "object"
+    typeof action.element ===
+      "object"
       ? action.element
       : {};
 
@@ -1884,9 +2644,11 @@ function locatorHintForAction(action) {
   const inferredRole =
     tagName === "button"
       ? "button"
-      : tagName === "a"
-        ? "link"
-        : "";
+      : (
+          tagName === "a"
+            ? "link"
+            : ""
+        );
 
   const role =
     explicitRole ||
@@ -2051,11 +2813,15 @@ function locatorHintForAction(action) {
 
   if (
     tagName === "div" &&
-    isLikelyNavigationText(text)
+    isLikelyNavigationText(
+      text
+    )
   ) {
     return (
       `locator('div').filter(` +
-      `${exactTextRegexObject(text)}` +
+      `${exactTextRegexObject(
+        text
+      )}` +
       `).first()`
     );
   }
@@ -2066,7 +2832,9 @@ function locatorHintForAction(action) {
   ) {
     return (
       `locator('${tagName}').filter(` +
-      `${exactTextRegexObject(text)}` +
+      `${exactTextRegexObject(
+        text
+      )}` +
       `).first()`
     );
   }
@@ -2086,16 +2854,21 @@ function locatorHintForAction(action) {
   );
 }
 
-function isLikelyNavigationText(text) {
+function isLikelyNavigationText(
+  text
+) {
   return /^(my rewards|login|log in|cart|checkout|account|profile|orders|rewards)$/i.test(
     compactActionValue(text)
   );
 }
 
-function traceElementKey(action) {
+function traceElementKey(
+  action
+) {
   if (
     !action ||
-    typeof action !== "object"
+    typeof action !==
+      "object"
   ) {
     return "";
   }
@@ -2104,27 +2877,45 @@ function traceElementKey(action) {
     compactActionValue(
       action.selector
     ),
+
     compactActionValue(
       action.text
     ),
-    actionElementIdentity(action),
-    actionFrameIdentity(action),
+
+    actionElementIdentity(
+      action
+    ),
+
+    actionFrameIdentity(
+      action
+    ),
   ]
     .filter(Boolean)
     .join(" | ");
 }
 
-function annotateTraceActions(actions) {
-  if (!Array.isArray(actions)) {
+function annotateTraceActions(
+  actions
+) {
+  if (
+    !Array.isArray(
+      actions
+    )
+  ) {
     return actions;
   }
 
   return actions.map(
-    (action, index) => {
+    (
+      action,
+      index
+    ) => {
       if (
         !action ||
-        typeof action !== "object" ||
-        action.action === "navigation"
+        typeof action !==
+          "object" ||
+        action.action ===
+          "navigation"
       ) {
         return action;
       }
@@ -2133,14 +2924,18 @@ function annotateTraceActions(actions) {
         index + 1;
 
       const elementKey =
-        traceElementKey(action);
+        traceElementKey(
+          action
+        );
 
       const actionKind =
         compactActionValue(
           action.action
         ).toLowerCase();
 
-      if (actionKind === "click") {
+      if (
+        actionKind === "click"
+      ) {
         const xpath =
           recordedXPathForAction(
             action
@@ -2150,28 +2945,39 @@ function annotateTraceActions(actions) {
           ...action,
           traceStep,
           elementKey,
-          locatorCode: xpath
-            ? (
-                `page.locator(` +
-                `${JSON.stringify(xpath)})`
-              )
-            : undefined,
-          locatorHint: xpath
-            ? (
-                `locator(` +
-                `${JSON.stringify(xpath)})`
-              )
-            : undefined,
+
+          locatorCode:
+            xpath
+              ? (
+                  `page.locator(` +
+                  `${JSON.stringify(
+                    xpath
+                  )})`
+                )
+              : undefined,
+
+          locatorHint:
+            xpath
+              ? (
+                  `locator(` +
+                  `${JSON.stringify(
+                    xpath
+                  )})`
+                )
+              : undefined,
         };
       }
 
       const locatorHint =
-        locatorHintForAction(action);
+        locatorHintForAction(
+          action
+        );
 
       return {
         ...action,
         traceStep,
         elementKey,
+
         locatorHint:
           locatorHint ||
           undefined,
@@ -2180,8 +2986,14 @@ function annotateTraceActions(actions) {
   );
 }
 
-function prepareTraceForLlm(parsedTrace) {
-  if (!Array.isArray(parsedTrace)) {
+function prepareTraceForLlm(
+  parsedTrace
+) {
+  if (
+    !Array.isArray(
+      parsedTrace
+    )
+  ) {
     return parsedTrace;
   }
 
@@ -2200,12 +3012,17 @@ function removeHtmlFillCleanupLines(
       .split(/\r?\n/);
 
   const cleaned = [];
-  let removedLocator = "";
 
-  for (const line of lines) {
-    const fillMatch = line.match(
-      /^\s*await\s+(.+?)\.fill\(\s*(['"`])([\s\S]*)\2\s*\);\s*$/
-    );
+  let removedLocator =
+    "";
+
+  for (
+    const line of lines
+  ) {
+    const fillMatch =
+      line.match(
+        /^\s*await\s+(.+?)\.fill\(\s*(['"`])([\s\S]*)\2\s*\);\s*$/
+      );
 
     if (
       fillMatch &&
@@ -2214,25 +3031,29 @@ function removeHtmlFillCleanupLines(
       )
     ) {
       removedLocator =
-        fillMatch[1].trim();
+        fillMatch[1]
+          .trim();
 
       continue;
     }
 
-    const pressMatch = line.match(
-      /^\s*await\s+(.+?)\.press\(\s*['"`]ControlOrMeta\+a['"`]\s*\);\s*$/
-    );
+    const pressMatch =
+      line.match(
+        /^\s*await\s+(.+?)\.press\(\s*['"`]ControlOrMeta\+a['"`]\s*\);\s*$/
+      );
 
     if (
       removedLocator &&
       pressMatch &&
-      pressMatch[1].trim() ===
+      pressMatch[1]
+        .trim() ===
         removedLocator
     ) {
       continue;
     }
 
     removedLocator = "";
+
     cleaned.push(line);
   }
 
@@ -2242,127 +3063,145 @@ function removeHtmlFillCleanupLines(
 function sanitizeCodegenForLlm(
   codegenText
 ) {
+  /*
+   * Remove check()/toBeChecked() from CODEGEN before
+   * sending it to the model so the model is less likely
+   * to reproduce those operations.
+   */
+  const codegenWithoutChecks =
+    removeCheckAndToBeCheckedStatements(
+      codegenText
+    );
+
   let sanitized =
     maskSensitiveText(
       removeHtmlFillCleanupLines(
-        codegenText
+        codegenWithoutChecks
       )
     );
 
-  sanitized = sanitized.replace(
-    /((?:page|page\d+|[A-Za-z_$][\w$]*)\.goto\(\s*['"`])([^'"`]+)(['"`]\s*\))/g,
-    (
-      _match,
-      prefix,
-      url,
-      suffix
-    ) =>
-      `${prefix}` +
-      `${maskUrlForLlm(url)}` +
-      `${suffix}`
-  );
-
-  sanitized = sanitized.replace(
-    /(await\s+.+?\.(?:fill|pressSequentially|type)\(\s*['"`])([^'"`\n]+)(['"`]\s*\);)/g,
-    (
-      _match,
-      prefix,
-      value,
-      suffix
-    ) => {
-      const hint =
-        getSensitivityHintFromText(
-          prefix
-        );
-
-      return (
-        `${prefix}` +
-        `${
-          hint
-            ? maskByKey(
-                hint,
-                value,
-                prefix
-              )
-            : maskSensitiveText(
-                value
-              )
-        }` +
-        `${suffix}`
-      );
-    }
-  );
-
-  sanitized = sanitized.replace(
-    /((?:authorization|cookie|x-api-key|api-key)\s*:\s*['"`])([^'"`\n]+)(['"`])/gi,
-    (
-      _match,
-      prefix,
-      value,
-      suffix
-    ) =>
-      `${prefix}` +
-      `${maskByKey(
+  sanitized =
+    sanitized.replace(
+      /((?:page|page\d+|[A-Za-z_$][\w$]*)\.goto\(\s*['"`])([^'"`]+)(['"`]\s*\))/g,
+      (
+        _match,
         prefix,
-        value
-      )}` +
-      `${suffix}`
-  );
+        url,
+        suffix
+      ) =>
+        `${prefix}` +
+        `${maskUrlForLlm(url)}` +
+        `${suffix}`
+    );
 
-  sanitized = sanitized.replace(
-    /((?:localStorage|sessionStorage)\.setItem\(\s*['"`][^'"`]+['"`]\s*,\s*['"`])([^'"`\n]+)(['"`]\s*\))/g,
-    (
-      _match,
-      prefix,
-      value,
-      suffix
-    ) =>
-      `${prefix}` +
-      `${maskSensitiveText(value)}` +
-      `${suffix}`
-  );
+  sanitized =
+    sanitized.replace(
+      /(await\s+.+?\.(?:fill|pressSequentially|type)\(\s*['"`])([^'"`\n]+)(['"`]\s*\);)/g,
+      (
+        _match,
+        prefix,
+        value,
+        suffix
+      ) => {
+        const hint =
+          getSensitivityHintFromText(
+            prefix
+          );
 
-  sanitized = sanitized.replace(
-    /(document\.cookie\s*=\s*['"`])([^'"`\n]+)(['"`])/g,
-    (
-      _match,
-      prefix,
-      value,
-      suffix
-    ) =>
-      `${prefix}` +
-      `${maskByKey(
-        "cookie",
-        value
-      )}` +
-      `${suffix}`
-  );
-
-  sanitized = sanitized.replace(
-    /((?:password|pass|token|secret|otp|phone|mobile|email)\s*:\s*['"`])([^'"`\n]+)(['"`])/gi,
-    (
-      _match,
-      prefix,
-      value,
-      suffix
-    ) => {
-      const keyMatch =
-        prefix.match(
-          /(?:password|pass|token|secret|otp|phone|mobile|email)/i
+        return (
+          `${prefix}` +
+          `${
+            hint
+              ? maskByKey(
+                  hint,
+                  value,
+                  prefix
+                )
+              : maskSensitiveText(
+                  value
+                )
+          }` +
+          `${suffix}`
         );
+      }
+    );
 
-      return (
+  sanitized =
+    sanitized.replace(
+      /((?:authorization|cookie|x-api-key|api-key)\s*:\s*['"`])([^'"`\n]+)(['"`])/gi,
+      (
+        _match,
+        prefix,
+        value,
+        suffix
+      ) =>
         `${prefix}` +
         `${maskByKey(
-          keyMatch
-            ? keyMatch[0]
-            : "",
+          prefix,
           value
         )}` +
         `${suffix}`
-      );
-    }
-  );
+    );
+
+  sanitized =
+    sanitized.replace(
+      /((?:localStorage|sessionStorage)\.setItem\(\s*['"`][^'"`]+['"`]\s*,\s*['"`])([^'"`\n]+)(['"`]\s*\))/g,
+      (
+        _match,
+        prefix,
+        value,
+        suffix
+      ) =>
+        `${prefix}` +
+        `${maskSensitiveText(
+          value
+        )}` +
+        `${suffix}`
+    );
+
+  sanitized =
+    sanitized.replace(
+      /(document\.cookie\s*=\s*['"`])([^'"`\n]+)(['"`])/g,
+      (
+        _match,
+        prefix,
+        value,
+        suffix
+      ) =>
+        `${prefix}` +
+        `${maskByKey(
+          "cookie",
+          value
+        )}` +
+        `${suffix}`
+    );
+
+  sanitized =
+    sanitized.replace(
+      /((?:password|pass|token|secret|otp|phone|mobile|email)\s*:\s*['"`])([^'"`\n]+)(['"`])/gi,
+      (
+        _match,
+        prefix,
+        value,
+        suffix
+      ) => {
+        const keyMatch =
+          prefix.match(
+            /(?:password|pass|token|secret|otp|phone|mobile|email)/i
+          );
+
+        return (
+          `${prefix}` +
+          `${maskByKey(
+            keyMatch
+              ? keyMatch[0]
+              : "",
+            value
+          )}` +
+          `${suffix}`
+        );
+      }
+    );
 
   return sanitized;
 }
@@ -2371,16 +3210,22 @@ function enforceDataDriven(
   script,
   testDataModel = null
 ) {
-  let updated = script;
+  let updated =
+    script;
 
   if (
-    testDataModel?.placeholderMap
+    testDataModel
+      ?.placeholderMap
   ) {
     const entries =
       Object.entries(
-        testDataModel.placeholderMap
+        testDataModel
+          .placeholderMap
       ).sort(
-        (left, right) =>
+        (
+          left,
+          right
+        ) =>
           right[0].length -
           left[0].length
       );
@@ -2399,59 +3244,62 @@ function enforceDataDriven(
     }
   }
 
-  updated = updated
-    .replace(
-      /\[MASKED_URL\]/g,
-      "testData.url"
-    )
-    .replace(
-      /https:\/\/site\.com\/path/g,
-      "testData.url"
-    )
-    .replace(
-      /\[MASKED_WEBSITE(?:_[A-Z0-9_]+)?\]/g,
-      "testData.website"
-    )
-    .replace(
-      /\[MASKED_(?:EMAIL|USERNAME)_SIGN_IN_NAME(?:_EMAIL)?\]/g,
-      "testData.signInName"
-    )
-    .replace(
-      /\[MASKED_USER(?:NAME)?\]/g,
-      "testData.username"
-    )
-    .replace(
-      /\[MASKED_PHONE\]/g,
-      "testData.phone"
-    )
-    .replace(
-      /\[MASKED_EMAIL\]/g,
-      "testData.email"
-    )
-    .replace(
-      /\[MASKED_PASSWORD\]/g,
-      "testData.password"
-    )
-    .replace(
-      /\[MASKED_CARD\]/g,
-      "testData.cardNumber"
-    )
-    .replace(
-      /\[MASKED_POSTAL_CODE\]/g,
-      "testData.postalCode"
-    )
-    .replace(
-      /\[MASKED_OTP\]/g,
-      "testData.otp"
+  updated =
+    updated
+      .replace(
+        /\[MASKED_URL\]/g,
+        "testData.url"
+      )
+      .replace(
+        /https:\/\/site\.com\/path/g,
+        "testData.url"
+      )
+      .replace(
+        /\[MASKED_WEBSITE(?:_[A-Z0-9_]+)?\]/g,
+        "testData.website"
+      )
+      .replace(
+        /\[MASKED_(?:EMAIL|USERNAME)_SIGN_IN_NAME(?:_EMAIL)?\]/g,
+        "testData.signInName"
+      )
+      .replace(
+        /\[MASKED_USER(?:NAME)?\]/g,
+        "testData.username"
+      )
+      .replace(
+        /\[MASKED_PHONE\]/g,
+        "testData.phone"
+      )
+      .replace(
+        /\[MASKED_EMAIL\]/g,
+        "testData.email"
+      )
+      .replace(
+        /\[MASKED_PASSWORD\]/g,
+        "testData.password"
+      )
+      .replace(
+        /\[MASKED_CARD\]/g,
+        "testData.cardNumber"
+      )
+      .replace(
+        /\[MASKED_POSTAL_CODE\]/g,
+        "testData.postalCode"
+      )
+      .replace(
+        /\[MASKED_OTP\]/g,
+        "testData.otp"
+      );
+
+  updated =
+    updated.replace(
+      /(['"`])(testData\.[A-Za-z_$][\w$]*)\1/g,
+      "$2"
     );
 
-  updated = updated.replace(
-    /(['"`])(testData\.[A-Za-z_$][\w$]*)\1/g,
-    "$2"
-  );
-
   if (
-    testDataModel?.records?.length
+    testDataModel
+      ?.records?.length
   ) {
     updated =
       rewriteGenericTestDataByLocator(
@@ -2460,7 +3308,11 @@ function enforceDataDriven(
       );
   }
 
-  if (!updated.includes("testData")) {
+  if (
+    !updated.includes(
+      "testData"
+    )
+  ) {
     updated =
       "import testData from " +
       "'../test-data.json';\n" +
@@ -2470,9 +3322,14 @@ function enforceDataDriven(
   return updated;
 }
 
-function compactLocatorContext(value) {
+function compactLocatorContext(
+  value
+) {
   return String(value || "")
-    .replace(/\s+/g, " ")
+    .replace(
+      /\s+/g,
+      " "
+    )
     .trim();
 }
 
@@ -2481,10 +3338,14 @@ function contextMatchesLine(
   context
 ) {
   const compactLine =
-    compactLocatorContext(line);
+    compactLocatorContext(
+      line
+    );
 
   const compactContext =
-    compactLocatorContext(context);
+    compactLocatorContext(
+      context
+    );
 
   if (
     !compactLine ||
@@ -2532,7 +3393,8 @@ function contextMatchesLine(
   if (
     nameMatch &&
     compactLine.includes(
-      nameMatch[1].trim()
+      nameMatch[1]
+        .trim()
     )
   ) {
     return true;
@@ -2547,8 +3409,11 @@ function rewriteGenericTestDataByLocator(
   script,
   records
 ) {
-  const latestByFieldAndKey = [];
-  const seen = new Set();
+  const latestByFieldAndKey =
+    [];
+
+  const seen =
+    new Set();
 
   for (
     let index =
@@ -2564,12 +3429,14 @@ function rewriteGenericTestDataByLocator(
 
     if (
       seen.has(identity) ||
-      record.key === record.field
+      record.key ===
+        record.field
     ) {
       continue;
     }
 
     seen.add(identity);
+
     latestByFieldAndKey.push(
       record
     );
@@ -2577,34 +3444,37 @@ function rewriteGenericTestDataByLocator(
 
   return script
     .split(/\r?\n/)
-    .map((line) => {
-      let updatedLine = line;
+    .map(
+      (line) => {
+        let updatedLine =
+          line;
 
-      for (
-        const record of
-        latestByFieldAndKey
-      ) {
-        if (
-          !updatedLine.includes(
-            `testData.${record.field}`
-          ) ||
-          !contextMatchesLine(
-            updatedLine,
-            record.context
-          )
+        for (
+          const record of
+          latestByFieldAndKey
         ) {
-          continue;
+          if (
+            !updatedLine.includes(
+              `testData.${record.field}`
+            ) ||
+            !contextMatchesLine(
+              updatedLine,
+              record.context
+            )
+          ) {
+            continue;
+          }
+
+          updatedLine =
+            updatedLine.replaceAll(
+              `testData.${record.field}`,
+              `testData.${record.key}`
+            );
         }
 
-        updatedLine =
-          updatedLine.replaceAll(
-            `testData.${record.field}`,
-            `testData.${record.key}`
-          );
+        return updatedLine;
       }
-
-      return updatedLine;
-    })
+    )
     .join("\n");
 }
 
@@ -2613,13 +3483,16 @@ function addCandidate(
   value
 ) {
   const text =
-    String(value ?? "").trim();
+    String(value ?? "")
+      .trim();
 
   if (!text) {
     return;
   }
 
-  if (!target.includes(text)) {
+  if (
+    !target.includes(text)
+  ) {
     target.push(text);
   }
 }
@@ -2629,7 +3502,8 @@ function addLatestCandidate(
   value
 ) {
   const text =
-    String(value ?? "").trim();
+    String(value ?? "")
+      .trim();
 
   if (!text) {
     return;
@@ -2638,7 +3512,9 @@ function addLatestCandidate(
   const existingIndex =
     target.indexOf(text);
 
-  if (existingIndex >= 0) {
+  if (
+    existingIndex >= 0
+  ) {
     target.splice(
       existingIndex,
       1
@@ -2670,7 +3546,8 @@ function addFieldRecord(
   context = ""
 ) {
   const text =
-    String(value ?? "").trim();
+    String(value ?? "")
+      .trim();
 
   if (
     !text ||
@@ -2711,19 +3588,25 @@ function addFieldRecord(
     field,
     key,
     value: text,
+
     context:
       String(context || ""),
+
     placeholder,
   };
 
-  if (existingIndex >= 0) {
+  if (
+    existingIndex >= 0
+  ) {
     bucket.records.splice(
       existingIndex,
       1
     );
   }
 
-  bucket.records.push(record);
+  bucket.records.push(
+    record
+  );
 }
 
 function addContextRecord(
@@ -2732,7 +3615,8 @@ function addContextRecord(
   context = ""
 ) {
   const text =
-    String(value ?? "").trim();
+    String(value ?? "")
+      .trim();
 
   if (!text) {
     return;
@@ -2762,8 +3646,10 @@ function addContextRecord(
     field: "text",
     key,
     value: text,
+
     context:
       String(context || ""),
+
     placeholder:
       buildMaskedPlaceholder(
         "text",
@@ -2771,14 +3657,18 @@ function addContextRecord(
       ),
   };
 
-  if (existingIndex >= 0) {
+  if (
+    existingIndex >= 0
+  ) {
     bucket.records.splice(
       existingIndex,
       1
     );
   }
 
-  bucket.records.push(record);
+  bucket.records.push(
+    record
+  );
 }
 
 function collectTraceCandidates(
@@ -2786,8 +3676,14 @@ function collectTraceCandidates(
   bucket =
     createCandidateBucket()
 ) {
-  if (Array.isArray(value)) {
-    for (const item of value) {
+  if (
+    Array.isArray(
+      value
+    )
+  ) {
+    for (
+      const item of value
+    ) {
       collectTraceCandidates(
         item,
         bucket
@@ -2799,13 +3695,16 @@ function collectTraceCandidates(
 
   if (
     value &&
-    typeof value === "object"
+    typeof value ===
+      "object"
   ) {
     for (
       const [
         key,
         entryValue,
-      ] of Object.entries(value)
+      ] of Object.entries(
+        value
+      )
     ) {
       const lowerKey =
         String(key || "")
@@ -2837,7 +3736,9 @@ function collectTraceCandidates(
             bucket,
             hint,
             entryValue,
-            extractTraceContext(value)
+            extractTraceContext(
+              value
+            )
           );
 
           continue;
@@ -2853,7 +3754,9 @@ function collectTraceCandidates(
           addContextRecord(
             bucket,
             entryValue,
-            extractTraceContext(value)
+            extractTraceContext(
+              value
+            )
           );
 
           continue;
@@ -2868,7 +3771,9 @@ function collectTraceCandidates(
             bucket,
             "website",
             entryValue,
-            extractTraceContext(value)
+            extractTraceContext(
+              value
+            )
           );
 
           continue;
@@ -2898,30 +3803,42 @@ function collectTraceCandidates(
             bucket,
             "username",
             entryValue,
-            extractTraceContext(value)
+            extractTraceContext(
+              value
+            )
           );
         }
 
         if (
-          lowerKey.includes("phone") ||
-          lowerKey.includes("mobile")
+          lowerKey.includes(
+            "phone"
+          ) ||
+          lowerKey.includes(
+            "mobile"
+          )
         ) {
           addFieldRecord(
             bucket,
             "phone",
             entryValue,
-            extractTraceContext(value)
+            extractTraceContext(
+              value
+            )
           );
         }
 
         if (
-          lowerKey.includes("email")
+          lowerKey.includes(
+            "email"
+          )
         ) {
           addFieldRecord(
             bucket,
             "email",
             entryValue,
-            extractTraceContext(value)
+            extractTraceContext(
+              value
+            )
           );
         }
 
@@ -2935,20 +3852,28 @@ function collectTraceCandidates(
             bucket,
             "password",
             entryValue,
-            extractTraceContext(value)
+            extractTraceContext(
+              value
+            )
           );
         }
 
         if (
-          lowerKey.includes("card") ||
-          lowerKey.includes("credit") ||
+          lowerKey.includes(
+            "card"
+          ) ||
+          lowerKey.includes(
+            "credit"
+          ) ||
           lowerKey === "cc"
         ) {
           addFieldRecord(
             bucket,
             "cardNumber",
             entryValue,
-            extractTraceContext(value)
+            extractTraceContext(
+              value
+            )
           );
         }
 
@@ -2956,24 +3881,32 @@ function collectTraceCandidates(
           lowerKey.includes(
             "postal"
           ) ||
-          lowerKey.includes("zip")
+          lowerKey.includes(
+            "zip"
+          )
         ) {
           addFieldRecord(
             bucket,
             "postalCode",
             entryValue,
-            extractTraceContext(value)
+            extractTraceContext(
+              value
+            )
           );
         }
 
         if (
-          lowerKey.includes("otp")
+          lowerKey.includes(
+            "otp"
+          )
         ) {
           addFieldRecord(
             bucket,
             "otp",
             entryValue,
-            extractTraceContext(value)
+            extractTraceContext(
+              value
+            )
           );
         }
       }
@@ -3046,8 +3979,10 @@ function collectCodegenCandidates(
     if (
       bucket.records.some(
         (record) =>
-          record.value === value &&
-          record.context === context
+          record.value ===
+            value &&
+          record.context ===
+            context
       )
     ) {
       continue;
@@ -3122,7 +4057,9 @@ function collectCodegenCandidates(
     }
 
     if (
-      /^\d{4,6}$/.test(value)
+      /^\d{4,6}$/.test(
+        value
+      )
     ) {
       addFieldRecord(
         bucket,
@@ -3151,46 +4088,55 @@ function collectCodegenCandidates(
   const keyValuePatterns = [
     {
       field: "password",
+
       pattern:
         /password\s*[:=]\s*['"`]([^'"`\\n]+)['"`]/gi,
     },
     {
       field: "password",
+
       pattern:
         /pass\s*[:=]\s*['"`]([^'"`\\n]+)['"`]/gi,
     },
     {
       field: "username",
+
       pattern:
         /(?:user-name|username|user name|user)\s*[:=]\s*['"`]([^'"`\\n]+)['"`]/gi,
     },
     {
       field: "email",
+
       pattern:
         /email\s*[:=]\s*['"`]([^'"`\\n]+)['"`]/gi,
     },
     {
       field: "website",
+
       pattern:
         /(?:website|web site|weburl)\s*[:=]\s*['"`]([^'"`\\n]+)['"`]/gi,
     },
     {
       field: "phone",
+
       pattern:
         /(?:phone|mobile)\s*[:=]\s*['"`]([^'"`\\n]+)['"`]/gi,
     },
     {
       field: "cardNumber",
+
       pattern:
         /(?:card|credit|cc)\s*[:=]\s*['"`]([^'"`\\n]+)['"`]/gi,
     },
     {
       field: "postalCode",
+
       pattern:
         /(?:postal|zip)\s*[:=]\s*['"`]([^'"`\\n]+)['"`]/gi,
     },
     {
       field: "otp",
+
       pattern:
         /otp\s*[:=]\s*['"`]([^'"`\\n]+)['"`]/gi,
     },
@@ -3204,7 +4150,9 @@ function collectCodegenCandidates(
   ) {
     for (
       const match of
-      codegenText.matchAll(pattern)
+      codegenText.matchAll(
+        pattern
+      )
     ) {
       addFieldRecord(
         bucket,
@@ -3218,12 +4166,16 @@ function collectCodegenCandidates(
   return bucket;
 }
 
-function firstMatch(...values) {
+function firstMatch(
+  ...values
+) {
   for (
-    const value of values.flat()
+    const value of
+    values.flat()
   ) {
     const text =
-      String(value ?? "").trim();
+      String(value ?? "")
+        .trim();
 
     if (text) {
       return text;
@@ -3233,7 +4185,9 @@ function firstMatch(...values) {
   return "";
 }
 
-function latestMatch(...values) {
+function latestMatch(
+  ...values
+) {
   const flattened =
     values.flat();
 
@@ -3245,7 +4199,8 @@ function latestMatch(...values) {
   ) {
     const text =
       String(
-        flattened[index] ?? ""
+        flattened[index] ??
+        ""
       ).trim();
 
     if (text) {
@@ -3266,7 +4221,9 @@ function buildTestDataPayload(
   try {
     traceCandidates =
       collectTraceCandidates(
-        JSON.parse(traceText)
+        JSON.parse(
+          traceText
+        )
       );
   } catch {
     traceCandidates =
@@ -3279,41 +4236,58 @@ function buildTestDataPayload(
     );
 
   const payload = {
-    url: firstMatch(
-      codegenCandidates.url,
-      getCanonicalStartUrl(
-        traceText
+    url:
+      firstMatch(
+        codegenCandidates.url,
+
+        getCanonicalStartUrl(
+          traceText
+        ),
+
+        traceCandidates.url
       ),
-      traceCandidates.url
-    ),
-    website: latestMatch(
-      traceCandidates.website,
-      codegenCandidates.website
-    ),
-    username: latestMatch(
-      traceCandidates.username,
-      codegenCandidates.username
-    ),
-    phone: latestMatch(
-      traceCandidates.phone,
-      codegenCandidates.phone
-    ),
-    email: latestMatch(
-      traceCandidates.email,
-      codegenCandidates.email
-    ),
-    password: latestMatch(
-      traceCandidates.password,
-      codegenCandidates.password
-    ),
-    cardNumber: latestMatch(
-      traceCandidates.cardNumber,
-      codegenCandidates.cardNumber
-    ),
-    otp: latestMatch(
-      traceCandidates.otp,
-      codegenCandidates.otp
-    ),
+
+    website:
+      latestMatch(
+        traceCandidates.website,
+        codegenCandidates.website
+      ),
+
+    username:
+      latestMatch(
+        traceCandidates.username,
+        codegenCandidates.username
+      ),
+
+    phone:
+      latestMatch(
+        traceCandidates.phone,
+        codegenCandidates.phone
+      ),
+
+    email:
+      latestMatch(
+        traceCandidates.email,
+        codegenCandidates.email
+      ),
+
+    password:
+      latestMatch(
+        traceCandidates.password,
+        codegenCandidates.password
+      ),
+
+    cardNumber:
+      latestMatch(
+        traceCandidates.cardNumber,
+        codegenCandidates.cardNumber
+      ),
+
+    otp:
+      latestMatch(
+        traceCandidates.otp,
+        codegenCandidates.otp
+      ),
   };
 
   for (
@@ -3344,7 +4318,9 @@ function buildTestDataModel(
   try {
     traceCandidates =
       collectTraceCandidates(
-        JSON.parse(traceText)
+        JSON.parse(
+          traceText
+        )
       );
   } catch {
     traceCandidates =
@@ -3378,10 +4354,12 @@ function buildTestDataModel(
 
   const placeholderMap =
     Object.fromEntries(
-      records.map((record) => [
-        record.placeholder,
-        record.key,
-      ])
+      records.map(
+        (record) => [
+          record.placeholder,
+          record.key,
+        ]
+      )
     );
 
   return {
@@ -3394,7 +4372,8 @@ function buildTestDataModel(
 function getUsedTestDataKeys(
   scriptText
 ) {
-  const keys = new Set();
+  const keys =
+    new Set();
 
   for (
     const match of
@@ -3402,7 +4381,9 @@ function getUsedTestDataKeys(
       /testData\.([A-Za-z_$][\w$]*)/g
     )
   ) {
-    keys.add(match[1]);
+    keys.add(
+      match[1]
+    );
   }
 
   return [...keys];
@@ -3419,17 +4400,20 @@ function pickUsedFields(
 
   return Object.fromEntries(
     usedKeys
-      .filter((key) =>
-        Object.prototype
-          .hasOwnProperty.call(
-            payload,
-            key
-          )
+      .filter(
+        (key) =>
+          Object.prototype
+            .hasOwnProperty.call(
+              payload,
+              key
+            )
       )
-      .map((key) => [
-        key,
-        payload[key],
-      ])
+      .map(
+        (key) => [
+          key,
+          payload[key],
+        ]
+      )
   );
 }
 
@@ -3449,13 +4433,19 @@ function getMissingTestDataKeys(
   );
 }
 
-function getTestDataPath(scriptPath) {
+function getTestDataPath(
+  scriptPath
+) {
   const scriptDir =
-    path.dirname(scriptPath);
+    path.dirname(
+      scriptPath
+    );
 
   const suiteName =
     path
-      .basename(scriptDir)
+      .basename(
+        scriptDir
+      )
       .toLowerCase();
 
   if (
@@ -3479,11 +4469,15 @@ function getTestDataImportPath(
   scriptPath
 ) {
   const scriptDir =
-    path.dirname(scriptPath);
+    path.dirname(
+      scriptPath
+    );
 
   const suiteName =
     path
-      .basename(scriptDir)
+      .basename(
+        scriptDir
+      )
       .toLowerCase();
 
   return (
@@ -3500,7 +4494,9 @@ function normalizeImportForTestData(
 ) {
   const importLine =
     `import testData from ` +
-    `'${getTestDataImportPath(scriptPath)}';`;
+    `'${getTestDataImportPath(
+      scriptPath
+    )}';`;
 
   const withoutTestDataImports =
     scriptText
@@ -3516,8 +4512,14 @@ function normalizeImportForTestData(
   );
 }
 
-function readJsonObject(filePath) {
-  if (!fs.existsSync(filePath)) {
+function readJsonObject(
+  filePath
+) {
+  if (
+    !fs.existsSync(
+      filePath
+    )
+  ) {
     return {};
   }
 
@@ -3532,7 +4534,8 @@ function readJsonObject(filePath) {
 
     return (
       value &&
-      typeof value === "object" &&
+      typeof value ===
+        "object" &&
       !Array.isArray(value)
     )
       ? value
@@ -3542,18 +4545,24 @@ function readJsonObject(filePath) {
   }
 }
 
-function valuesMatch(left, right) {
+function valuesMatch(
+  left,
+  right
+) {
   return (
     JSON.stringify(left) ===
     JSON.stringify(right)
   );
 }
 
-function isBlankValue(value) {
+function isBlankValue(
+  value
+) {
   return (
     value === null ||
     value === undefined ||
-    String(value).trim() === ""
+    String(value).trim() ===
+      ""
   );
 }
 
@@ -3561,7 +4570,8 @@ function isMeaningfulTestDataKey(
   key
 ) {
   const text =
-    String(key || "").trim();
+    String(key || "")
+      .trim();
 
   if (
     !text ||
@@ -3570,7 +4580,11 @@ function isMeaningfulTestDataKey(
     return false;
   }
 
-  if (isGeneratedIdValue(text)) {
+  if (
+    isGeneratedIdValue(
+      text
+    )
+  ) {
     return false;
   }
 
@@ -3593,6 +4607,7 @@ function nextAvailableDataKey(
   baseKey
 ) {
   let index = 2;
+
   let candidate =
     `${baseKey}${index}`;
 
@@ -3604,6 +4619,7 @@ function nextAvailableDataKey(
       )
   ) {
     index += 1;
+
     candidate =
       `${baseKey}${index}`;
   }
@@ -3611,11 +4627,14 @@ function nextAvailableDataKey(
   return candidate;
 }
 
-function escapeRegExp(value) {
-  return String(value).replace(
-    /[.*+?^${}()|[\]\\]/g,
-    "\\$&"
-  );
+function escapeRegExp(
+  value
+) {
+  return String(value)
+    .replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&"
+    );
 }
 
 function replaceTestDataKey(
@@ -3626,7 +4645,9 @@ function replaceTestDataKey(
   return scriptText.replace(
     new RegExp(
       `\\btestData\\.` +
-      `${escapeRegExp(fromKey)}` +
+      `${escapeRegExp(
+        fromKey
+      )}` +
       `\\b`,
       "g"
     ),
@@ -3640,94 +4661,137 @@ function normalizeBracketTestDataAccess(
   let updated =
     String(scriptText || "");
 
-  updated = updated.replace(
-    /testData\[(["'])([A-Za-z0-9_$-]+)\1\]/g,
-    (
-      _match,
-      _quote,
-      key
-    ) => {
-      const rawKey =
-        String(key || "");
+  updated =
+    updated.replace(
+      /testData\[(["'])([A-Za-z0-9_$-]+)\1\]/g,
+      (
+        _match,
+        _quote,
+        key
+      ) => {
+        const rawKey =
+          String(key || "");
 
-      const lowerKey =
-        rawKey.toLowerCase();
+        const lowerKey =
+          rawKey.toLowerCase();
 
-      if (
-        lowerKey === "email" ||
-        /email$/.test(lowerKey)
-      ) {
-        return "testData.email";
+        if (
+          lowerKey === "email" ||
+          /email$/.test(
+            lowerKey
+          )
+        ) {
+          return "testData.email";
+        }
+
+        if (
+          lowerKey ===
+            "password" ||
+          /password$/.test(
+            lowerKey
+          ) ||
+          /pass$/.test(
+            lowerKey
+          )
+        ) {
+          return "testData.password";
+        }
+
+        if (
+          lowerKey === "phone" ||
+          /phone$/.test(
+            lowerKey
+          ) ||
+          /mobile$/.test(
+            lowerKey
+          )
+        ) {
+          return "testData.phone";
+        }
+
+        if (
+          lowerKey ===
+            "postalcode" ||
+          lowerKey ===
+            "postal_code" ||
+          /postal$/.test(
+            lowerKey
+          ) ||
+          /zip$/.test(
+            lowerKey
+          )
+        ) {
+          return "testData.postalCode";
+        }
+
+        if (
+          lowerKey ===
+            "username" ||
+          /username$/.test(
+            lowerKey
+          ) ||
+          /user_name$/.test(
+            lowerKey
+          ) ||
+          /signinname$/.test(
+            lowerKey
+          )
+        ) {
+          return "testData.username";
+        }
+
+        if (
+          lowerKey ===
+            "website" ||
+          /website$/.test(
+            lowerKey
+          ) ||
+          /web$/.test(
+            lowerKey
+          )
+        ) {
+          return "testData.website";
+        }
+
+        if (
+          lowerKey ===
+            "cardnumber" ||
+          /card$/.test(
+            lowerKey
+          ) ||
+          /credit$/.test(
+            lowerKey
+          ) ||
+          /cc$/.test(
+            lowerKey
+          )
+        ) {
+          return "testData.cardNumber";
+        }
+
+        if (
+          lowerKey === "otp" ||
+          /otp$/.test(
+            lowerKey
+          )
+        ) {
+          return "testData.otp";
+        }
+
+        if (
+          lowerKey === "url" ||
+          /url$/.test(
+            lowerKey
+          )
+        ) {
+          return "testData.url";
+        }
+
+        return (
+          `testData.${rawKey}`
+        );
       }
-
-      if (
-        lowerKey === "password" ||
-        /password$/.test(lowerKey) ||
-        /pass$/.test(lowerKey)
-      ) {
-        return "testData.password";
-      }
-
-      if (
-        lowerKey === "phone" ||
-        /phone$/.test(lowerKey) ||
-        /mobile$/.test(lowerKey)
-      ) {
-        return "testData.phone";
-      }
-
-      if (
-        lowerKey === "postalcode" ||
-        lowerKey === "postal_code" ||
-        /postal$/.test(lowerKey) ||
-        /zip$/.test(lowerKey)
-      ) {
-        return "testData.postalCode";
-      }
-
-      if (
-        lowerKey === "username" ||
-        /username$/.test(lowerKey) ||
-        /user_name$/.test(lowerKey) ||
-        /signinname$/.test(lowerKey)
-      ) {
-        return "testData.username";
-      }
-
-      if (
-        lowerKey === "website" ||
-        /website$/.test(lowerKey) ||
-        /web$/.test(lowerKey)
-      ) {
-        return "testData.website";
-      }
-
-      if (
-        lowerKey === "cardnumber" ||
-        /card$/.test(lowerKey) ||
-        /credit$/.test(lowerKey) ||
-        /cc$/.test(lowerKey)
-      ) {
-        return "testData.cardNumber";
-      }
-
-      if (
-        lowerKey === "otp" ||
-        /otp$/.test(lowerKey)
-      ) {
-        return "testData.otp";
-      }
-
-      if (
-        lowerKey === "url" ||
-        /url$/.test(lowerKey)
-      ) {
-        return "testData.url";
-      }
-
-      return `testData.${rawKey}`;
-    }
-  );
+    );
 
   return updated;
 }
@@ -3740,7 +4804,8 @@ function pickPreferredSemanticTestDataKey(
     String(rawKey || "")
       .toLowerCase();
 
-  const preferredCandidates = [];
+  const preferredCandidates =
+    [];
 
   if (
     lowerKey === "url" ||
@@ -3761,8 +4826,11 @@ function pickPreferredSemanticTestDataKey(
   }
 
   if (
-    lowerKey === "password" ||
-    /password$/.test(lowerKey) ||
+    lowerKey ===
+      "password" ||
+    /password$/.test(
+      lowerKey
+    ) ||
     /pass$/.test(lowerKey)
   ) {
     preferredCandidates.push(
@@ -3773,7 +4841,9 @@ function pickPreferredSemanticTestDataKey(
   if (
     lowerKey === "phone" ||
     /phone$/.test(lowerKey) ||
-    /mobile$/.test(lowerKey)
+    /mobile$/.test(
+      lowerKey
+    )
   ) {
     preferredCandidates.push(
       "phone"
@@ -3781,8 +4851,11 @@ function pickPreferredSemanticTestDataKey(
   }
 
   if (
-    lowerKey === "website" ||
-    /website$/.test(lowerKey) ||
+    lowerKey ===
+      "website" ||
+    /website$/.test(
+      lowerKey
+    ) ||
     /web$/.test(lowerKey)
   ) {
     preferredCandidates.push(
@@ -3792,9 +4865,13 @@ function pickPreferredSemanticTestDataKey(
   }
 
   if (
-    lowerKey === "postalcode" ||
-    lowerKey === "postal_code" ||
-    /postal$/.test(lowerKey) ||
+    lowerKey ===
+      "postalcode" ||
+    lowerKey ===
+      "postal_code" ||
+    /postal$/.test(
+      lowerKey
+    ) ||
     /zip$/.test(lowerKey)
   ) {
     preferredCandidates.push(
@@ -3804,10 +4881,17 @@ function pickPreferredSemanticTestDataKey(
   }
 
   if (
-    lowerKey === "username" ||
-    /username$/.test(lowerKey) ||
-    /user_name$/.test(lowerKey) ||
-    /signinname$/.test(lowerKey)
+    lowerKey ===
+      "username" ||
+    /username$/.test(
+      lowerKey
+    ) ||
+    /user_name$/.test(
+      lowerKey
+    ) ||
+    /signinname$/.test(
+      lowerKey
+    )
   ) {
     preferredCandidates.push(
       "username"
@@ -3815,9 +4899,12 @@ function pickPreferredSemanticTestDataKey(
   }
 
   if (
-    lowerKey === "cardnumber" ||
+    lowerKey ===
+      "cardnumber" ||
     /card$/.test(lowerKey) ||
-    /credit$/.test(lowerKey) ||
+    /credit$/.test(
+      lowerKey
+    ) ||
     /cc$/.test(lowerKey)
   ) {
     preferredCandidates.push(
@@ -3845,8 +4932,11 @@ function pickPreferredSemanticTestDataKey(
   }
 
   if (
-    lowerKey === "company" ||
-    /company$/.test(lowerKey)
+    lowerKey ===
+      "company" ||
+    /company$/.test(
+      lowerKey
+    )
   ) {
     preferredCandidates.push(
       "addressCompany",
@@ -3855,8 +4945,11 @@ function pickPreferredSemanticTestDataKey(
   }
 
   if (
-    lowerKey === "attention" ||
-    /attention$/.test(lowerKey)
+    lowerKey ===
+      "attention" ||
+    /attention$/.test(
+      lowerKey
+    )
   ) {
     preferredCandidates.push(
       "addressAttention",
@@ -3871,7 +4964,9 @@ function pickPreferredSemanticTestDataKey(
     lowerKey.includes(
       "address_line_one"
     ) ||
-    /lineone$/.test(lowerKey)
+    /lineone$/.test(
+      lowerKey
+    )
   ) {
     preferredCandidates.push(
       "addressLineOne"
@@ -3885,7 +4980,9 @@ function pickPreferredSemanticTestDataKey(
     lowerKey.includes(
       "address_line_two"
     ) ||
-    /linetwo$/.test(lowerKey)
+    /linetwo$/.test(
+      lowerKey
+    )
   ) {
     preferredCandidates.push(
       "addressLineTwo"
@@ -3896,7 +4993,9 @@ function pickPreferredSemanticTestDataKey(
     lowerKey.includes(
       "addresslabel"
     ) ||
-    /label$/.test(lowerKey)
+    /label$/.test(
+      lowerKey
+    )
   ) {
     preferredCandidates.push(
       "addressLabel"
@@ -3907,7 +5006,9 @@ function pickPreferredSemanticTestDataKey(
     lowerKey.includes(
       "customername"
     ) ||
-    /name$/.test(lowerKey)
+    /name$/.test(
+      lowerKey
+    )
   ) {
     preferredCandidates.push(
       "customerName"
@@ -4000,7 +5101,9 @@ function normalizeInvalidTestDataAccess(
       }
 
       if (candidate) {
-        return `testData.${candidate}`;
+        return (
+          `testData.${candidate}`
+        );
       }
 
       return match;
@@ -4016,19 +5119,33 @@ function rewriteLiteralFormValuesToTestData(
     scriptText;
 
   const entries =
-    Object.entries(payload)
+    Object.entries(
+      payload
+    )
       .filter(
         ([, value]) =>
-          !isBlankValue(value)
+          !isBlankValue(
+            value
+          )
       )
       .sort(
-        (left, right) =>
-          String(right[1]).length -
-          String(left[1]).length
+        (
+          left,
+          right
+        ) =>
+          String(
+            right[1]
+          ).length -
+          String(
+            left[1]
+          ).length
       );
 
   for (
-    const [key, value] of entries
+    const [
+      key,
+      value,
+    ] of entries
   ) {
     const literal =
       escapeRegExp(
@@ -4046,10 +5163,11 @@ function rewriteLiteralFormValuesToTestData(
         "g"
       );
 
-    updated = updated.replace(
-      methodPattern,
-      `$1${replacement}$3`
-    );
+    updated =
+      updated.replace(
+        methodPattern,
+        `$1${replacement}$3`
+      );
   }
 
   return updated;
@@ -4062,10 +5180,13 @@ function extractTextScopedButtonLocators(
 
   const patterns = [
     /page\.getByRole\(\s*['"]button['"]\s*\)\.filter\(\s*\{\s*hasText:\s*(['"])([^'"]+)\1\s*\}\s*\)/g,
+
     /page\.locator\(\s*(['"])button\1\s*\)\.filter\(\s*\{\s*hasText:\s*(['"])([^'"]+)\2\s*\}\s*\)/g,
   ];
 
-  for (const pattern of patterns) {
+  for (
+    const pattern of patterns
+  ) {
     for (
       const match of
       String(
@@ -4084,7 +5205,9 @@ function extractTextScopedButtonLocators(
 
       locators.push(
         `page.getByRole('button').filter(` +
-        `{ hasText: ${JSON.stringify(text)} })`
+        `{ hasText: ${JSON.stringify(
+          text
+        )} })`
       );
     }
   }
@@ -4104,26 +5227,30 @@ function rewriteAnonymousButtonsFromCodegen(
     );
 
   if (
-    !textScopedButtonLocators.length
+    !textScopedButtonLocators
+      .length
   ) {
     return scriptText;
   }
 
-  let updated = scriptText;
+  let updated =
+    scriptText;
 
   for (
     const locator of
     textScopedButtonLocators
   ) {
-    updated = updated.replace(
-      /page\.getByRole\(\s*['"]button['"]\s*\)\.first\(\)/,
-      locator
-    );
+    updated =
+      updated.replace(
+        /page\.getByRole\(\s*['"]button['"]\s*\)\.first\(\)/,
+        locator
+      );
 
-    updated = updated.replace(
-      /page\.locator\(\s*['"]button['"]\s*\)\.first\(\)/,
-      locator
-    );
+    updated =
+      updated.replace(
+        /page\.locator\(\s*['"]button['"]\s*\)\.first\(\)/,
+        locator
+      );
   }
 
   return updated;
@@ -4136,6 +5263,7 @@ function rewriteKnownDuplicateButtonLocators(
     scriptText || ""
   ).replace(
     /page\.getByRole\(\s*['"]button['"]\s*,\s*\{\s*name:\s*(['"])New Address\1\s*,\s*exact:\s*true\s*\}\s*\)(?!\s*\.\s*(?:first|nth|last)\s*\()/g,
+
     "page.getByRole('button', " +
     "{ name: 'New Address', exact: true })" +
     ".nth(1)"
@@ -4153,10 +5281,14 @@ function rewriteDatagridSelectionLocators(
 
   try {
     const parsedTrace =
-      JSON.parse(traceText);
+      JSON.parse(
+        traceText
+      );
 
     traceActions =
-      Array.isArray(parsedTrace)
+      Array.isArray(
+        parsedTrace
+      )
         ? parsedTrace
         : [];
   } catch {
@@ -4164,11 +5296,13 @@ function rewriteDatagridSelectionLocators(
   }
 
   for (
-    const action of traceActions
+    const action of
+    traceActions
   ) {
     const element =
       action &&
-      typeof action === "object" &&
+      typeof action ===
+        "object" &&
       typeof action.element ===
         "object"
         ? action.element
@@ -4178,7 +5312,8 @@ function rewriteDatagridSelectionLocators(
       !element ||
       compactActionValue(
         element.tagName
-      ).toLowerCase() !== "input"
+      ).toLowerCase() !==
+        "input"
     ) {
       continue;
     }
@@ -4227,6 +5362,7 @@ function rewriteDatagridSelectionLocators(
         `${escapedId}\\1\\s*\\)`,
         "g"
       ),
+
       new RegExp(
         `page\\.locator\\(` +
         `\\s*(['"])\\[id=` +
@@ -4252,58 +5388,19 @@ function rewriteDatagridSelectionLocators(
         selector
       )
     ) {
-      updated = updated.replace(
-        /page\.locator\(\s*(['"])(?:#|\[id=)[^'"]+?\1\s*\)/g,
-        replacement
-      );
+      updated =
+        updated.replace(
+          /page\.locator\(\s*(['"])(?:#|\[id=)[^'"]+?\1\s*\)/g,
+          replacement
+        );
     }
 
-    const actionKind =
-      compactActionValue(
-        action.action
-      ).toLowerCase();
-
-    if (
-      type === "checkbox" &&
-      [
-        "checkbox",
-        "input",
-        "check",
-        "change",
-      ].includes(actionKind)
-    ) {
-      updated = updated.replace(
-        new RegExp(
-          `(await\\s+` +
-          `${escapeRegExp(replacement)})` +
-          `(?:\\.first\\(\\))?` +
-          `\\.click\\(\\);`,
-          "g"
-        ),
-        "$1.check();"
-      );
-    }
-
-    if (
-      type === "radio" &&
-      [
-        "radio",
-        "input",
-        "check",
-        "change",
-      ].includes(actionKind)
-    ) {
-      updated = updated.replace(
-        new RegExp(
-          `(await\\s+` +
-          `${escapeRegExp(replacement)})` +
-          `(?:\\.first\\(\\))?` +
-          `\\.click\\(\\);`,
-          "g"
-        ),
-        "$1.check();"
-      );
-    }
+    /*
+     * Do not convert click() into check().
+     *
+     * All .check() calls are temporarily forbidden and are
+     * removed by removeCheckAndToBeCheckedStatements().
+     */
   }
 
   return updated;
@@ -4329,7 +5426,11 @@ function inferSelectionRoleFromIdentifier(
     return "checkbox";
   }
 
-  if (/(?:radio)/.test(text)) {
+  if (
+    /(?:radio)/.test(
+      text
+    )
+  ) {
     return "radio";
   }
 
@@ -4367,17 +5468,23 @@ function isSemanticSelectionLocatorExpression(
     new RegExp(
       `getByRole\\(` +
       `\\s*['"]` +
-      `${escapeRegExp(roleToken)}` +
+      `${escapeRegExp(
+        roleToken
+      )}` +
       `['"]`,
       "i"
     ).test(text) ||
+
     new RegExp(
       `getByRole\\(` +
       `\\s*['"][^'"]+['"]` +
       `\\s*,\\s*\\{[^}]*name:`,
       "i"
     ).test(text) ||
-    /getByLabel\(/i.test(text)
+
+    /getByLabel\(/i.test(
+      text
+    )
   );
 }
 
@@ -4395,7 +5502,9 @@ function rewriteSemanticSelectionLocators(
   const declarationPattern =
     /^(\s*)(const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(.+?);?$/;
 
-  for (const rawLine of lines) {
+  for (
+    const rawLine of lines
+  ) {
     const line =
       String(rawLine || "");
 
@@ -4443,7 +5552,9 @@ function rewriteSemanticSelectionLocators(
         )
       );
 
-    if (!isWeakSelectionLocator) {
+    if (
+      !isWeakSelectionLocator
+    ) {
       updated.push(line);
       continue;
     }
@@ -4490,7 +5601,9 @@ function getMaskedArtifactPaths(
   const baseName =
     path.basename(
       outputPath,
-      path.extname(outputPath)
+      path.extname(
+        outputPath
+      )
     );
 
   return {
@@ -4499,6 +5612,7 @@ function getMaskedArtifactPaths(
         maskedDir,
         `${baseName}.masked.trace.json`
       ),
+
     codegenPath:
       path.join(
         maskedDir,
@@ -4510,13 +5624,19 @@ function getMaskedArtifactPaths(
 function cleanExistingMaskedArtifacts(
   maskedDir
 ) {
-  if (!fs.existsSync(maskedDir)) {
+  if (
+    !fs.existsSync(
+      maskedDir
+    )
+  ) {
     return;
   }
 
   for (
     const item of
-    fs.readdirSync(maskedDir)
+    fs.readdirSync(
+      maskedDir
+    )
   ) {
     if (
       item.endsWith(
@@ -4547,11 +5667,15 @@ function writeMaskedArtifacts(
     );
 
   const maskedDir =
-    path.dirname(paths.tracePath);
+    path.dirname(
+      paths.tracePath
+    );
 
   fs.mkdirSync(
     maskedDir,
-    { recursive: true }
+    {
+      recursive: true,
+    }
   );
 
   cleanExistingMaskedArtifacts(
@@ -4581,7 +5705,9 @@ function writeTestDataFile(
   testDataModel = null
 ) {
   const testDataPath =
-    getTestDataPath(scriptPath);
+    getTestDataPath(
+      scriptPath
+    );
 
   const payload =
     pickUsedFields(
@@ -4592,11 +5718,14 @@ function writeTestDataFile(
           codegenText
         )
       ).payload,
+
       scriptText
     );
 
   const mergedPayload =
-    readJsonObject(testDataPath);
+    readJsonObject(
+      testDataPath
+    );
 
   let updatedScript =
     normalizeImportForTestData(
@@ -4605,8 +5734,12 @@ function writeTestDataFile(
     );
 
   for (
-    const [key, value] of
-    Object.entries(payload)
+    const [
+      key,
+      value,
+    ] of Object.entries(
+      payload
+    )
   ) {
     const exactKeyExists =
       Object.prototype
@@ -4644,7 +5777,8 @@ function writeTestDataFile(
 
     if (
       existingMatchingKey &&
-      existingMatchingKey !== key
+      existingMatchingKey !==
+        key
     ) {
       if (
         keyIsMeaningful &&
@@ -4719,7 +5853,9 @@ function writeTestDataFile(
       );
 
     if (!existingMatchingKey) {
-      mergedPayload[targetKey] =
+      mergedPayload[
+        targetKey
+      ] =
         value;
     }
 
@@ -4731,13 +5867,27 @@ function writeTestDataFile(
       );
   }
 
+  /*
+   * Final protection after import/test-data rewriting.
+   */
+  updatedScript =
+    removeCheckAndToBeCheckedStatements(
+      updatedScript
+    );
+
+  assertNoCheckOrToBeChecked(
+    updatedScript
+  );
+
   const missingKeys =
     getMissingTestDataKeys(
       updatedScript,
       mergedPayload
     );
 
-  if (missingKeys.length) {
+  if (
+    missingKeys.length
+  ) {
     throw new Error(
       `Generated script references missing ` +
       `testData keys in ${testDataPath}: ` +
@@ -4746,8 +5896,12 @@ function writeTestDataFile(
   }
 
   fs.mkdirSync(
-    path.dirname(testDataPath),
-    { recursive: true }
+    path.dirname(
+      testDataPath
+    ),
+    {
+      recursive: true,
+    }
   );
 
   fs.writeFileSync(
@@ -4762,7 +5916,9 @@ function writeTestDataFile(
 
   return {
     testDataPath,
-    scriptText: updatedScript,
+
+    scriptText:
+      updatedScript,
   };
 }
 
@@ -4770,13 +5926,16 @@ function countMeaningfulTraceActions(
   traceText
 ) {
   const actions =
-    parseTraceActions(traceText);
+    parseTraceActions(
+      traceText
+    );
 
   return actions.filter(
     (action) => {
       if (
         !action ||
-        typeof action !== "object"
+        typeof action !==
+          "object"
       ) {
         return false;
       }
@@ -4870,12 +6029,18 @@ function assertRefineInputsAreUsable({
   }
 }
 
-function parseTraceActions(traceText) {
+function parseTraceActions(
+  traceText
+) {
   try {
     const parsed =
-      JSON.parse(traceText);
+      JSON.parse(
+        traceText
+      );
 
-    return Array.isArray(parsed)
+    return Array.isArray(
+      parsed
+    )
       ? parsed
       : [];
   } catch {
@@ -4883,19 +6048,25 @@ function parseTraceActions(traceText) {
   }
 }
 
-function isTopLevelNavigation(action) {
+function isTopLevelNavigation(
+  action
+) {
   return (
     action &&
-    action.action === "navigation" &&
+    action.action ===
+      "navigation" &&
     !action.isIframe &&
     !action.frameChain?.length
   );
 }
 
-function isUsefulNavigationUrl(rawUrl) {
+function isUsefulNavigationUrl(
+  rawUrl
+) {
   if (
     !rawUrl ||
-    typeof rawUrl !== "string"
+    typeof rawUrl !==
+      "string"
   ) {
     return false;
   }
@@ -4966,7 +6137,8 @@ function normalizeNavigationUrl(
     ];
 
     for (
-      const key of dropParams
+      const key of
+      dropParams
     ) {
       url.searchParams.delete(
         key
@@ -4977,7 +6149,8 @@ function normalizeNavigationUrl(
       `${url.origin}${url.pathname}`;
 
     const query =
-      url.searchParams.toString();
+      url.searchParams
+        .toString();
 
     return query
       ? `${normalized}?${query}`
@@ -4991,7 +6164,9 @@ function getCanonicalStartUrl(
   traceText
 ) {
   const actions =
-    parseTraceActions(traceText);
+    parseTraceActions(
+      traceText
+    );
 
   const navigation =
     actions.find(
@@ -5017,7 +6192,9 @@ function listFilesByPrefix(
   suffix
 ) {
   if (
-    !fs.existsSync(dirPath) ||
+    !fs.existsSync(
+      dirPath
+    ) ||
     !fs
       .statSync(dirPath)
       .isDirectory()
@@ -5029,12 +6206,21 @@ function listFilesByPrefix(
     .readdirSync(dirPath)
     .filter(
       (name) =>
-        name.startsWith(prefix) &&
-        name.endsWith(suffix)
+        name.startsWith(
+          prefix
+        ) &&
+        name.endsWith(
+          suffix
+        )
     )
     .sort(
-      (left, right) =>
-        right.localeCompare(left)
+      (
+        left,
+        right
+      ) =>
+        right.localeCompare(
+          left
+        )
     )
     .map(
       (name) =>
@@ -5051,18 +6237,25 @@ function getArtifactStamp(
   suffix
 ) {
   const base =
-    path.basename(filePath);
+    path.basename(
+      filePath
+    );
 
   if (
-    !base.startsWith(prefix) ||
-    !base.endsWith(suffix)
+    !base.startsWith(
+      prefix
+    ) ||
+    !base.endsWith(
+      suffix
+    )
   ) {
     return "";
   }
 
   return base.slice(
     prefix.length,
-    base.length - suffix.length
+    base.length -
+      suffix.length
   );
 }
 
@@ -5099,6 +6292,7 @@ function getLatestArtifactPairFromDirectory(
             "actions-",
             ".json"
           ),
+
           filePath,
         ]
       )
@@ -5116,7 +6310,9 @@ function getLatestArtifactPairFromDirectory(
       );
 
     const tracePath =
-      tracesByStamp.get(stamp);
+      tracesByStamp.get(
+        stamp
+      );
 
     if (tracePath) {
       return {
@@ -5134,14 +6330,18 @@ function getLatestArtifactPairFromDirectory(
         "codegen-",
         ".js"
       ),
+
     tracePath:
       traceFiles[0],
+
     codegenPath:
       codegenFiles[0],
   };
 }
 
-function sanitizeBaseName(value) {
+function sanitizeBaseName(
+  value
+) {
   const normalized =
     String(value || "")
       .trim()
@@ -5183,8 +6383,12 @@ function buildOutputPath(
     );
 
   const shouldTreatAsDirectory =
-    outputValue.endsWith("/") ||
-    outputValue.endsWith("\\") ||
+    outputValue.endsWith(
+      "/"
+    ) ||
+    outputValue.endsWith(
+      "\\"
+    ) ||
     (
       fs.existsSync(
         resolvedOutput
@@ -5196,7 +6400,9 @@ function buildOutputPath(
         .isDirectory()
     );
 
-  if (shouldTreatAsDirectory) {
+  if (
+    shouldTreatAsDirectory
+  ) {
     const safeBase =
       sanitizeBaseName(
         fallbackName
@@ -5238,7 +6444,8 @@ function buildOutputPath(
 
 function resolvePythonExecutable() {
   const candidates =
-    process.platform === "win32"
+    process.platform ===
+    "win32"
       ? [
           path.join(
             ROOT,
@@ -5246,6 +6453,7 @@ function resolvePythonExecutable() {
             "Scripts",
             "python.exe"
           ),
+
           "python",
         ]
       : [
@@ -5255,13 +6463,16 @@ function resolvePythonExecutable() {
             "bin",
             "python"
           ),
+
           "python3",
           "python",
         ];
 
   return candidates.find(
     (candidate) =>
-      fs.existsSync(candidate) ||
+      fs.existsSync(
+        candidate
+      ) ||
       !candidate.includes(
         path.sep
       )
@@ -5293,17 +6504,20 @@ function persistGeneratedScripts({
   const pythonExecutable =
     resolvePythonExecutable();
 
-  const result = spawnSync(
-    pythonExecutable,
-    args,
-    {
-      cwd: ROOT,
-      env: process.env,
-      encoding: "utf8",
-    }
-  );
+  const result =
+    spawnSync(
+      pythonExecutable,
+      args,
+      {
+        cwd: ROOT,
+        env: process.env,
+        encoding: "utf8",
+      }
+    );
 
-  if (result.status !== 0) {
+  if (
+    result.status !== 0
+  ) {
     const details = [
       result.stderr,
       result.stdout,
@@ -5323,14 +6537,18 @@ function persistGeneratedScripts({
     );
   }
 
-  if (result.stdout.trim()) {
+  if (
+    result.stdout.trim()
+  ) {
     console.log(
       result.stdout.trim()
     );
   }
 }
 
-function deriveTestName(codegenPath) {
+function deriveTestName(
+  codegenPath
+) {
   return (
     path
       .basename(
@@ -5373,6 +6591,7 @@ function formatAllowedTestDataKeys(
 
   return [
     "ALLOWED TESTDATA KEYS:",
+
     ...keys.map(
       (key) =>
         `- testData.${key}`
@@ -5384,12 +6603,17 @@ function collectRecordedClickXPaths(
   traceText
 ) {
   const actions =
-    parseTraceActions(traceText);
+    parseTraceActions(
+      traceText
+    );
 
   const clickActions =
     actions
       .map(
-        (action, traceIndex) => ({
+        (
+          action,
+          traceIndex
+        ) => ({
           action,
           traceIndex,
         })
@@ -5416,7 +6640,8 @@ function collectRecordedClickXPaths(
     throw new Error(
       `TRACE click at step ` +
       `${
-        missingXPath.traceIndex + 1
+        missingXPath.traceIndex +
+        1
       } does not contain a selector ` +
       `beginning with xpath=.`
     );
@@ -5444,7 +6669,10 @@ function formatRecordedClickXPaths(
 
   return clickXPaths
     .map(
-      (xpath, index) =>
+      (
+        xpath,
+        index
+      ) =>
         `${index + 1}. ` +
         `${JSON.stringify(xpath)}`
     )
@@ -5466,7 +6694,8 @@ function assertClicksUseRecordedXPaths(
   const directXPathClickPattern =
     /^\s*await\s+page\.locator\(\s*("(?:\\.|[^"\\])*")\s*\)\s*\.click\(\s*\);\s*$/gm;
 
-  const actualClickXPaths = [];
+  const actualClickXPaths =
+    [];
 
   for (
     const match of
@@ -5478,7 +6707,9 @@ function assertClicksUseRecordedXPaths(
 
     try {
       selector =
-        JSON.parse(match[1]);
+        JSON.parse(
+          match[1]
+        );
     } catch {
       throw new Error(
         `Unable to parse generated ` +
@@ -5529,12 +6760,18 @@ function assertClicksUseRecordedXPaths(
     index += 1
   ) {
     const expected =
-      expectedClickXPaths[index];
+      expectedClickXPaths[
+        index
+      ];
 
     const actual =
-      actualClickXPaths[index];
+      actualClickXPaths[
+        index
+      ];
 
-    if (actual !== expected) {
+    if (
+      actual !== expected
+    ) {
       throw new Error(
         `Click ${index + 1} used the wrong XPath.\n` +
         `Expected: ${expected}\n` +
@@ -5544,13 +6781,17 @@ function assertClicksUseRecordedXPaths(
   }
 }
 
-function traceAnchorKindForClickRepair(action) {
+function traceAnchorKindForClickRepair(
+  action
+) {
   const kind =
     String(
       action?.action || ""
     ).toLowerCase();
 
-  if (kind === "navigation") {
+  if (
+    kind === "navigation"
+  ) {
     return "navigation";
   }
 
@@ -5562,7 +6803,9 @@ function traceAnchorKindForClickRepair(action) {
     return "input";
   }
 
-  if (kind === "press") {
+  if (
+    kind === "press"
+  ) {
     return "press";
   }
 
@@ -5574,7 +6817,9 @@ function traceAnchorKindForClickRepair(action) {
     return "check";
   }
 
-  if (kind === "uncheck") {
+  if (
+    kind === "uncheck"
+  ) {
     return "uncheck";
   }
 
@@ -5585,18 +6830,26 @@ function traceAnchorKindForClickRepair(action) {
     return "select";
   }
 
-  if (kind === "hover") {
+  if (
+    kind === "hover"
+  ) {
     return "hover";
   }
 
   return "";
 }
 
-function generatedAnchorKindForClickRepair(line) {
+function generatedAnchorKindForClickRepair(
+  line
+) {
   const text =
-    String(line || "").trim();
+    String(line || "")
+      .trim();
 
-  if (!text || text.startsWith("//")) {
+  if (
+    !text ||
+    text.startsWith("//")
+  ) {
     return "";
   }
 
@@ -5616,23 +6869,43 @@ function generatedAnchorKindForClickRepair(line) {
     return "input";
   }
 
-  if (/\.press\s*\(/.test(text)) {
+  if (
+    /\.press\s*\(/.test(
+      text
+    )
+  ) {
     return "press";
   }
 
-  if (/\.check\s*\(/.test(text)) {
+  if (
+    /\.check\s*\(/.test(
+      text
+    )
+  ) {
     return "check";
   }
 
-  if (/\.uncheck\s*\(/.test(text)) {
+  if (
+    /\.uncheck\s*\(/.test(
+      text
+    )
+  ) {
     return "uncheck";
   }
 
-  if (/\.selectOption\s*\(/.test(text)) {
+  if (
+    /\.selectOption\s*\(/.test(
+      text
+    )
+  ) {
     return "select";
   }
 
-  if (/\.hover\s*\(/.test(text)) {
+  if (
+    /\.hover\s*\(/.test(
+      text
+    )
+  ) {
     return "hover";
   }
 
@@ -5680,9 +6953,12 @@ const CLICK_REPAIR_IGNORED_TOKENS =
 function collectClickRepairTokens(
   values
 ) {
-  const tokens = new Set();
+  const tokens =
+    new Set();
 
-  for (const value of values) {
+  for (
+    const value of values
+  ) {
     const text =
       String(value || "");
 
@@ -5692,7 +6968,9 @@ function collectClickRepairTokens(
 
     for (
       const token of
-      tokenizeIdentifier(text)
+      tokenizeIdentifier(
+        text
+      )
     ) {
       const normalized =
         String(token || "")
@@ -5702,14 +6980,15 @@ function collectClickRepairTokens(
       if (
         !normalized ||
         normalized.length < 3 ||
-        CLICK_REPAIR_IGNORED_TOKENS.has(
-          normalized
-        )
+        CLICK_REPAIR_IGNORED_TOKENS
+          .has(normalized)
       ) {
         continue;
       }
 
-      tokens.add(normalized);
+      tokens.add(
+        normalized
+      );
     }
   }
 
@@ -5721,14 +7000,16 @@ function getTraceActionClickRepairTokens(
 ) {
   if (
     !action ||
-    typeof action !== "object"
+    typeof action !==
+      "object"
   ) {
     return new Set();
   }
 
   const element =
     action.element &&
-    typeof action.element === "object"
+    typeof action.element ===
+      "object"
       ? action.element
       : {};
 
@@ -5802,16 +7083,16 @@ function generatedLineMatchesTraceAnchor(
 
   if (
     !traceKind ||
-    generatedKind !== traceKind
+    generatedKind !==
+      traceKind
   ) {
     return false;
   }
 
-  /*
-   * Navigation actions are chronological anchors,
-   * not element-specific controls.
-   */
-  if (traceKind === "navigation") {
+  if (
+    traceKind ===
+    "navigation"
+  ) {
     return true;
   }
 
@@ -5835,10 +7116,6 @@ function generatedLineMatchesTraceAnchor(
       action
     );
 
-  /*
-   * When TRACE contains no usable control identity,
-   * retain the previous action-kind fallback.
-   */
   if (!traceTokens.size) {
     return true;
   }
@@ -5848,9 +7125,14 @@ function generatedLineMatchesTraceAnchor(
       line
     );
 
-  for (const token of traceTokens) {
+  for (
+    const token of
+    traceTokens
+  ) {
     if (
-      generatedTokens.has(token)
+      generatedTokens.has(
+        token
+      )
     ) {
       return true;
     }
@@ -5859,11 +7141,17 @@ function generatedLineMatchesTraceAnchor(
   return false;
 }
 
-function isGeneratedClickStatementForRepair(line) {
+function isGeneratedClickStatementForRepair(
+  line
+) {
   const text =
-    String(line || "").trim();
+    String(line || "")
+      .trim();
 
-  if (!text || text.startsWith("//")) {
+  if (
+    !text ||
+    text.startsWith("//")
+  ) {
     return false;
   }
 
@@ -5872,9 +7160,12 @@ function isGeneratedClickStatementForRepair(line) {
   );
 }
 
-function findTestClosingLineForClickRepair(lines) {
+function findTestClosingLineForClickRepair(
+  lines
+) {
   for (
-    let index = lines.length - 1;
+    let index =
+      lines.length - 1;
     index >= 0;
     index -= 1
   ) {
@@ -5893,54 +7184,71 @@ function findTestClosingLineForClickRepair(lines) {
 function removeMalformedXPathLocatorFragments(
   scriptText
 ) {
-  return String(scriptText || "")
+  return String(
+    scriptText || ""
+  )
     .split(/\r?\n/)
-    .filter((line) => {
-      const text =
-        String(line || "").trim();
+    .filter(
+      (line) => {
+        const text =
+          String(line || "")
+            .trim();
 
-      const match =
-        text.match(
-          /\bpage\.locator\(\s*(["'])xpath=/
-        );
+        const match =
+          text.match(
+            /\bpage\.locator\(\s*(["'])xpath=/
+          );
 
-      if (!match) {
-        return true;
-      }
-
-      const quote = match[1];
-
-      const selectorStart =
-        (match.index || 0) +
-        match[0].length;
-
-      let escaped = false;
-
-      for (
-        let index = selectorStart;
-        index < text.length;
-        index += 1
-      ) {
-        const character =
-          text[index];
-
-        if (escaped) {
-          escaped = false;
-          continue;
-        }
-
-        if (character === "\\") {
-          escaped = true;
-          continue;
-        }
-
-        if (character === quote) {
+        if (!match) {
           return true;
         }
-      }
 
-      return false;
-    })
+        const quote =
+          match[1];
+
+        const selectorStart =
+          (
+            match.index ||
+            0
+          ) +
+          match[0].length;
+
+        let escaped =
+          false;
+
+        for (
+          let index =
+            selectorStart;
+          index <
+            text.length;
+          index += 1
+        ) {
+          const character =
+            text[index];
+
+          if (escaped) {
+            escaped = false;
+            continue;
+          }
+
+          if (
+            character === "\\"
+          ) {
+            escaped = true;
+            continue;
+          }
+
+          if (
+            character ===
+            quote
+          ) {
+            return true;
+          }
+        }
+
+        return false;
+      }
+    )
     .join("\n");
 }
 
@@ -5960,8 +7268,12 @@ function rebuildRecordedClicksFromTrace(
       traceText
     );
 
-  if (!expectedClickXPaths.length) {
-    return String(scriptText || "");
+  if (
+    !expectedClickXPaths.length
+  ) {
+    return String(
+      scriptText || ""
+    );
   }
 
   const originalLines =
@@ -5970,14 +7282,27 @@ function rebuildRecordedClicksFromTrace(
     ).split(/\r?\n/);
 
   const lines = [];
-  let skippingMultilineClick = false;
 
-  for (const line of originalLines) {
-    const trimmed = line.trim();
+  let skippingMultilineClick =
+    false;
 
-    if (skippingMultilineClick) {
-      if (/\)\s*;?\s*$/.test(trimmed)) {
-        skippingMultilineClick = false;
+  for (
+    const line of
+    originalLines
+  ) {
+    const trimmed =
+      line.trim();
+
+    if (
+      skippingMultilineClick
+    ) {
+      if (
+        /\)\s*;?\s*$/.test(
+          trimmed
+        )
+      ) {
+        skippingMultilineClick =
+          false;
       }
 
       continue;
@@ -5995,9 +7320,13 @@ function rebuildRecordedClicksFromTrace(
       /^await\s+[\s\S]+\.click\s*\(/.test(
         trimmed
       ) &&
-      !/\)\s*;?\s*$/.test(trimmed)
+      !/\)\s*;?\s*$/.test(
+        trimmed
+      )
     ) {
-      skippingMultilineClick = true;
+      skippingMultilineClick =
+        true;
+
       continue;
     }
 
@@ -6009,10 +7338,17 @@ function rebuildRecordedClicksFromTrace(
       lines
     );
 
-  const insertions = new Map();
-  const pendingClicks = [];
-  let lineSearchStart = 0;
-  let insertedCount = 0;
+  const insertions =
+    new Map();
+
+  const pendingClicks =
+    [];
+
+  let lineSearchStart =
+    0;
+
+  let insertedCount =
+    0;
 
   const queueInsertion = (
     lineIndex,
@@ -6025,8 +7361,15 @@ function rebuildRecordedClicksFromTrace(
       JSON.stringify(xpath) +
       ").click();";
 
-    if (!insertions.has(lineIndex)) {
-      insertions.set(lineIndex, []);
+    if (
+      !insertions.has(
+        lineIndex
+      )
+    ) {
+      insertions.set(
+        lineIndex,
+        []
+      );
     }
 
     insertions
@@ -6039,18 +7382,26 @@ function rebuildRecordedClicksFromTrace(
   const flushPendingBefore = (
     lineIndex
   ) => {
-    if (!pendingClicks.length) {
+    if (
+      !pendingClicks.length
+    ) {
       return;
     }
 
     const anchorLine =
-      lines[lineIndex] || "";
+      lines[lineIndex] ||
+      "";
 
     const indent =
-      anchorLine.match(/^\s*/)?.[0] ||
+      anchorLine.match(
+        /^\s*/
+      )?.[0] ||
       "  ";
 
-    for (const xpath of pendingClicks) {
+    for (
+      const xpath of
+      pendingClicks
+    ) {
       queueInsertion(
         lineIndex,
         xpath,
@@ -6058,28 +7409,42 @@ function rebuildRecordedClicksFromTrace(
       );
     }
 
-    pendingClicks.length = 0;
+    pendingClicks.length =
+      0;
   };
 
-  for (const action of actions) {
+  for (
+    const action of
+    actions
+  ) {
     const actionKind =
       String(
         action?.action || ""
       ).toLowerCase();
 
-    if (actionKind === "click") {
+    if (
+      actionKind === "click"
+    ) {
       const xpath =
-        typeof action?.selector === "string"
+        typeof action?.selector ===
+          "string"
           ? action.selector
           : "";
 
-      if (!xpath.startsWith("xpath=")) {
+      if (
+        !xpath.startsWith(
+          "xpath="
+        )
+      ) {
         throw new Error(
           "Cannot rebuild TRACE click without an xpath= selector."
         );
       }
 
-      pendingClicks.push(xpath);
+      pendingClicks.push(
+        xpath
+      );
+
       continue;
     }
 
@@ -6092,11 +7457,14 @@ function rebuildRecordedClicksFromTrace(
       continue;
     }
 
-    let matchingLineIndex = -1;
+    let matchingLineIndex =
+      -1;
 
     for (
-      let index = lineSearchStart;
-      index < closingLineIndex;
+      let index =
+        lineSearchStart;
+      index <
+        closingLineIndex;
       index += 1
     ) {
       if (
@@ -6105,12 +7473,16 @@ function rebuildRecordedClicksFromTrace(
           action
         )
       ) {
-        matchingLineIndex = index;
+        matchingLineIndex =
+          index;
+
         break;
       }
     }
 
-    if (matchingLineIndex < 0) {
+    if (
+      matchingLineIndex < 0
+    ) {
       continue;
     }
 
@@ -6122,7 +7494,9 @@ function rebuildRecordedClicksFromTrace(
       matchingLineIndex + 1;
   }
 
-  if (pendingClicks.length) {
+  if (
+    pendingClicks.length
+  ) {
     const fallbackIndex =
       Math.min(
         closingLineIndex,
@@ -6135,13 +7509,19 @@ function rebuildRecordedClicksFromTrace(
           0,
           fallbackIndex - 1
         )
-      ] || "";
+      ] ||
+      "";
 
     const indent =
-      previousLine.match(/^\s*/)?.[0] ||
+      previousLine.match(
+        /^\s*/
+      )?.[0] ||
       "  ";
 
-    for (const xpath of pendingClicks) {
+    for (
+      const xpath of
+      pendingClicks
+    ) {
       queueInsertion(
         fallbackIndex,
         xpath,
@@ -6167,18 +7547,27 @@ function rebuildRecordedClicksFromTrace(
 
   for (
     let index = 0;
-    index <= lines.length;
+    index <=
+      lines.length;
     index += 1
   ) {
     const pendingInsertion =
-      insertions.get(index) || [];
+      insertions.get(
+        index
+      ) ||
+      [];
 
     rebuilt.push(
       ...pendingInsertion
     );
 
-    if (index < lines.length) {
-      rebuilt.push(lines[index]);
+    if (
+      index <
+      lines.length
+    ) {
+      rebuilt.push(
+        lines[index]
+      );
     }
   }
 
@@ -6222,9 +7611,15 @@ await page.locator("xpath=...").click();
 
 7. Do not use locator variables for click actions.
 
-8. Do not convert a TRACE click into check(), focus(), selectOption(), an assertion, a wait, or another action.
+8. Do not convert a TRACE click into focus(), selectOption(), an assertion, a wait, or another action.
 
-9. These restrictions apply only to actions marked "click". Non-click operations may use appropriate TRACE or CODEGEN locators.
+9. Do not generate .check() calls anywhere in the script.
+
+10. Do not generate toBeChecked() assertions anywhere in the script.
+
+11. A checkbox or radio interaction recorded as a TRACE click must remain a direct XPath click.
+
+12. Non-click operations may use appropriate TRACE or CODEGEN locators, except .check() and toBeChecked(), which are currently forbidden.
 
 REQUIRED CLICK XPATHS IN EXACT ORDER:
 
@@ -6241,16 +7636,26 @@ ${codegen}
 `;
 }
 
-function cleanLlmOutput(rawOutput) {
+function cleanLlmOutput(
+  rawOutput
+) {
   let cleaned =
     String(rawOutput || "")
       .trim();
 
-  if (cleaned.includes("```")) {
+  if (
+    cleaned.includes(
+      "```"
+    )
+  ) {
     const parts =
-      cleaned.split("```");
+      cleaned.split(
+        "```"
+      );
 
-    if (parts.length >= 3) {
+    if (
+      parts.length >= 3
+    ) {
       let candidate =
         parts[1].trim();
 
@@ -6270,33 +7675,50 @@ function cleanLlmOutput(rawOutput) {
       } else if (
         candidate
           .toLowerCase()
-          .startsWith("js")
+          .startsWith(
+            "js"
+          )
       ) {
         candidate =
           candidate
-            .slice("js".length)
+            .slice(
+              "js".length
+            )
             .trim();
       }
 
-      cleaned = candidate;
+      cleaned =
+        candidate;
     }
   }
 
   const importIndex =
-    cleaned.indexOf("import ");
+    cleaned.indexOf(
+      "import "
+    );
 
   const testIndex =
-    cleaned.indexOf("test(");
+    cleaned.indexOf(
+      "test("
+    );
 
-  if (importIndex >= 0) {
+  if (
+    importIndex >= 0
+  ) {
     cleaned =
       cleaned
-        .slice(importIndex)
+        .slice(
+          importIndex
+        )
         .trim();
-  } else if (testIndex >= 0) {
+  } else if (
+    testIndex >= 0
+  ) {
     cleaned =
       cleaned
-        .slice(testIndex)
+        .slice(
+          testIndex
+        )
         .trim();
   }
 
@@ -6314,7 +7736,9 @@ function isLikelyStyleOnlyCssSelector(
     return false;
   }
 
-  if (!text.includes(".")) {
+  if (
+    !text.includes(".")
+  ) {
     return false;
   }
 
@@ -6338,9 +7762,14 @@ function isLikelyStyleOnlyCssSelector(
     ...text.matchAll(
       /\.([A-Za-z_-][\w-]*)/g
     ),
-  ].map((match) => match[1]);
+  ].map(
+    (match) =>
+      match[1]
+  );
 
-  if (!classMatches.length) {
+  if (
+    !classMatches.length
+  ) {
     return false;
   }
 
@@ -6410,6 +7839,7 @@ function findStyleOnlyLocatorLine(
     return scriptText
       .slice(
         lineStart,
+
         lineEnd === -1
           ? scriptText.length
           : lineEnd
@@ -6420,7 +7850,9 @@ function findStyleOnlyLocatorLine(
   return "";
 }
 
-function tokenizeIdentifier(value) {
+function tokenizeIdentifier(
+  value
+) {
   const text =
     String(value || "");
 
@@ -6472,7 +7904,9 @@ function normalizeLocatorExpressionForOutput(
       hint
     )
   ) {
-    return `page.${hint}`;
+    return (
+      `page.${hint}`
+    );
   }
 
   if (
@@ -6482,13 +7916,17 @@ function normalizeLocatorExpressionForOutput(
   ) {
     return (
       `page.locator(` +
-      `${JSON.stringify(hint)})`
+      `${JSON.stringify(
+        hint
+      )})`
     );
   }
 
   return (
     `page.locator(` +
-    `${JSON.stringify(hint)})`
+    `${JSON.stringify(
+      hint
+    )})`
   );
 }
 
@@ -6496,7 +7934,9 @@ function actionLocatorExpression(
   action
 ) {
   const hint =
-    locatorHintForAction(action);
+    locatorHintForAction(
+      action
+    );
 
   return normalizeLocatorExpressionForOutput(
     hint
@@ -6507,18 +7947,25 @@ function buildTraceLocatorCandidates(
   traceText
 ) {
   return prepareTraceForLlm(
-    parseTraceActions(traceText)
+    parseTraceActions(
+      traceText
+    )
   )
-    .map((action) => ({
-      action,
-      expression:
-        actionLocatorExpression(
-          action
-        ),
-    }))
+    .map(
+      (action) => ({
+        action,
+
+        expression:
+          actionLocatorExpression(
+            action
+          ),
+      })
+    )
     .filter(
       (item) =>
-        Boolean(item.expression)
+        Boolean(
+          item.expression
+        )
     );
 }
 
@@ -6528,49 +7975,63 @@ function scoreTraceCandidateForIdentifier(
   line
 ) {
   const action =
-    candidate?.action || {};
+    candidate?.action ||
+    {};
 
   const element =
     action &&
-    typeof action.element === "object"
+    typeof action.element ===
+      "object"
       ? action.element
       : {};
 
   const haystack = [
     candidate.expression,
+
     compactActionValue(
       action.selector
     ),
+
     compactActionValue(
       action.text
     ),
+
     compactActionValue(
       action.value
     ),
+
     compactActionValue(
       action.neighborText
     ),
+
     compactActionValue(
       action.label
     ),
+
     compactActionValue(
       element.tagName
     ),
+
     compactActionValue(
       element.type
     ),
+
     compactActionValue(
       element.role
     ),
+
     compactActionValue(
       element.name
     ),
+
     compactActionValue(
       element.id
     ),
+
     compactActionValue(
       element.ariaLabel
     ),
+
     compactActionValue(
       element.dataLabel
     ),
@@ -6589,13 +8050,18 @@ function scoreTraceCandidateForIdentifier(
 
   let score = 0;
 
-  for (const token of tokens) {
+  for (
+    const token of
+    tokens
+  ) {
     if (!token) {
       continue;
     }
 
     if (
-      haystack.includes(token)
+      haystack.includes(
+        token
+      )
     ) {
       score +=
         token.length > 3
@@ -6605,7 +8071,9 @@ function scoreTraceCandidateForIdentifier(
   }
 
   if (
-    tokens.includes("checkbox") &&
+    tokens.includes(
+      "checkbox"
+    ) &&
     compactActionValue(
       element.type
     ).toLowerCase() ===
@@ -6615,7 +8083,9 @@ function scoreTraceCandidateForIdentifier(
   }
 
   if (
-    tokens.includes("radio") &&
+    tokens.includes(
+      "radio"
+    ) &&
     compactActionValue(
       element.type
     ).toLowerCase() ===
@@ -6625,7 +8095,9 @@ function scoreTraceCandidateForIdentifier(
   }
 
   if (
-    tokens.includes("button") &&
+    tokens.includes(
+      "button"
+    ) &&
     compactActionValue(
       element.role
     ).toLowerCase() ===
@@ -6635,7 +8107,9 @@ function scoreTraceCandidateForIdentifier(
   }
 
   if (
-    tokens.includes("link") &&
+    tokens.includes(
+      "link"
+    ) &&
     compactActionValue(
       element.role
     ).toLowerCase() ===
@@ -6645,8 +8119,12 @@ function scoreTraceCandidateForIdentifier(
   }
 
   if (
-    tokens.includes("input") ||
-    tokens.includes("field")
+    tokens.includes(
+      "input"
+    ) ||
+    tokens.includes(
+      "field"
+    )
   ) {
     if (
       [
@@ -6669,7 +8147,9 @@ function scoreTraceCandidateForIdentifier(
   }
 
   if (
-    lineText.includes("click") &&
+    lineText.includes(
+      "click"
+    ) &&
     compactActionValue(
       action.action
     ).toLowerCase() ===
@@ -6679,7 +8159,9 @@ function scoreTraceCandidateForIdentifier(
   }
 
   if (
-    lineText.includes("check") &&
+    lineText.includes(
+      "check"
+    ) &&
     [
       "checkbox",
       "radio",
@@ -6693,7 +8175,9 @@ function scoreTraceCandidateForIdentifier(
   }
 
   if (
-    lineText.includes("visible") &&
+    lineText.includes(
+      "visible"
+    ) &&
     (
       compactActionValue(
         action.text
@@ -6724,7 +8208,9 @@ function chooseTraceLocatorForIdentifier(
   }
 
   let best = null;
-  let bestScore = -1;
+
+  let bestScore =
+    -1;
 
   for (
     const candidate of
@@ -6737,9 +8223,14 @@ function chooseTraceLocatorForIdentifier(
         line
       );
 
-    if (score > bestScore) {
-      best = candidate;
-      bestScore = score;
+    if (
+      score > bestScore
+    ) {
+      best =
+        candidate;
+
+      bestScore =
+        score;
     }
   }
 
@@ -6788,26 +8279,30 @@ function repairUndeclaredLocatorVariables(
   const declarationPattern =
     /^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/;
 
-  const declared = new Set([
-    "test",
-    "expect",
-    "page",
-    "frame",
-    "testData",
-    "heal",
-    "request",
-    "console",
-    "process",
-    "module",
-    "exports",
-    "__dirname",
-    "__filename",
-    "require",
-  ]);
+  const declared =
+    new Set([
+      "test",
+      "expect",
+      "page",
+      "frame",
+      "testData",
+      "heal",
+      "request",
+      "console",
+      "process",
+      "module",
+      "exports",
+      "__dirname",
+      "__filename",
+      "require",
+    ]);
 
   const repaired = [];
 
-  for (const rawLine of lines) {
+  for (
+    const rawLine of
+    lines
+  ) {
     const line =
       String(rawLine || "");
 
@@ -6820,7 +8315,9 @@ function repairUndeclaredLocatorVariables(
       );
 
     if (match) {
-      declared.add(match[1]);
+      declared.add(
+        match[1]
+      );
     }
 
     const usages = [
@@ -6829,7 +8326,9 @@ function repairUndeclaredLocatorVariables(
       ),
     ].filter(
       (name) =>
-        !declared.has(name)
+        !declared.has(
+          name
+        )
     );
 
     if (usages.length) {
@@ -6879,14 +8378,18 @@ function extractBareLocatorUsages(
   const text =
     String(line || "");
 
-  const usages = new Set();
+  const usages =
+    new Set();
 
   const patterns = [
     /\bexpect\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\./g,
+
     /\b(?:await\s+)?([A-Za-z_$][\w$]*)\.(?:click|fill|check|uncheck|setChecked|selectOption|press|type|pressSequentially|hover|tap|focus|blur|scrollIntoViewIfNeeded|waitFor|setInputFiles|dragTo|toBeVisible|toBeHidden|toBeEnabled|toBeDisabled|toBeEditable|toBeChecked|toHaveText|toHaveValue|toContainText|toHaveAttribute|toBeAttached|toHaveCount|toBeEmpty)\s*\(/g,
   ];
 
-  for (const pattern of patterns) {
+  for (
+    const pattern of patterns
+  ) {
     for (
       const match of
       text.matchAll(pattern)
@@ -6926,7 +8429,9 @@ function findUndeclaredBareLocatorUsage(
     ]);
 
   const declared =
-    new Set(allowedGlobals);
+    new Set(
+      allowedGlobals
+    );
 
   const lines =
     String(script || "")
@@ -6935,7 +8440,10 @@ function findUndeclaredBareLocatorUsage(
   const declarationPattern =
     /^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/;
 
-  for (const rawLine of lines) {
+  for (
+    const rawLine of
+    lines
+  ) {
     const line =
       String(rawLine || "")
         .trim();
@@ -6946,7 +8454,11 @@ function findUndeclaredBareLocatorUsage(
         line
       )
     ) {
-      if (!declared.has(usage)) {
+      if (
+        !declared.has(
+          usage
+        )
+      ) {
         return line;
       }
     }
@@ -6973,6 +8485,14 @@ function assertGeneratedScriptIsComplete(
   const text =
     String(script || "")
       .trim();
+
+  /*
+   * Explicitly reject any check()/toBeChecked()
+   * operation that survives cleanup.
+   */
+  assertNoCheckOrToBeChecked(
+    text
+  );
 
   if (
     !text.includes(
@@ -7009,9 +8529,13 @@ function assertGeneratedScriptIsComplete(
   }
 
   const styleOnlyLocatorLine =
-    findStyleOnlyLocatorLine(text);
+    findStyleOnlyLocatorLine(
+      text
+    );
 
-  if (styleOnlyLocatorLine) {
+  if (
+    styleOnlyLocatorLine
+  ) {
     throw new Error(
       "Generated script contains a style-only " +
       "CSS locator. Use a meaningful role/text/" +
@@ -7023,16 +8547,20 @@ function assertGeneratedScriptIsComplete(
   const hardcodedFillLine =
     text
       .split(/\r?\n/)
-      .find((line) => {
-        const trimmed =
-          line.trim();
+      .find(
+        (line) => {
+          const trimmed =
+            line.trim();
 
-        return /\.(?:fill|pressSequentially|type)\(\s*['"`]/.test(
-          trimmed
-        );
-      });
+          return /\.(?:fill|pressSequentially|type)\(\s*['"`]/.test(
+            trimmed
+          );
+        }
+      );
 
-  if (hardcodedFillLine) {
+  if (
+    hardcodedFillLine
+  ) {
     throw new Error(
       "Generated script contains a hardcoded " +
       "fill/type value. Move the value into " +
@@ -7044,36 +8572,41 @@ function assertGeneratedScriptIsComplete(
   const invalidTestDataKeyLine =
     text
       .split(/\r?\n/)
-      .find((line) => {
-        const matches = [
-          ...line.matchAll(
-            /testData\.([A-Za-z0-9_$][A-Za-z0-9_$]*)/g
-          ),
-        ];
+      .find(
+        (line) => {
+          const matches = [
+            ...line.matchAll(
+              /testData\.([A-Za-z0-9_$][A-Za-z0-9_$]*)/g
+            ),
+          ];
 
-        return matches.some(
-          (match) => {
-            const key =
-              String(
-                match[1] || ""
+          return matches.some(
+            (match) => {
+              const key =
+                String(
+                  match[1] ||
+                  ""
+                );
+
+              return (
+                !/^[A-Za-z_$][\w$]*$/.test(
+                  key
+                ) ||
+                !isMeaningfulTestDataKey(
+                  key
+                ) ||
+                isGeneratedIdValue(
+                  key
+                )
               );
+            }
+          );
+        }
+      );
 
-            return (
-              !/^[A-Za-z_$][\w$]*$/.test(
-                key
-              ) ||
-              !isMeaningfulTestDataKey(
-                key
-              ) ||
-              isGeneratedIdValue(
-                key
-              )
-            );
-          }
-        );
-      });
-
-  if (invalidTestDataKeyLine) {
+  if (
+    invalidTestDataKeyLine
+  ) {
     throw new Error(
       "Generated script contains an invalid or " +
       "generated testData key. Use a semantic key " +
@@ -7087,7 +8620,9 @@ function assertGeneratedScriptIsComplete(
       text
     );
 
-  if (undeclaredLocatorLine) {
+  if (
+    undeclaredLocatorLine
+  ) {
     throw new Error(
       "Generated script uses an undeclared locator " +
       "variable. Declare it before first use or " +
@@ -7098,14 +8633,23 @@ function assertGeneratedScriptIsComplete(
 
   const tempPath =
     path.join(
-      path.dirname(outputPath),
-      `.${path.basename(outputPath)}` +
+      path.dirname(
+        outputPath
+      ),
+
+      `.${path.basename(
+        outputPath
+      )}` +
       `.syntax-check-${Date.now()}.js`
     );
 
   fs.mkdirSync(
-    path.dirname(tempPath),
-    { recursive: true }
+    path.dirname(
+      tempPath
+    ),
+    {
+      recursive: true,
+    }
   );
 
   try {
@@ -7115,19 +8659,22 @@ function assertGeneratedScriptIsComplete(
       "utf8"
     );
 
-    const result = spawnSync(
-      process.execPath,
-      [
-        "--check",
-        tempPath,
-      ],
-      {
-        cwd: ROOT,
-        encoding: "utf8",
-      }
-    );
+    const result =
+      spawnSync(
+        process.execPath,
+        [
+          "--check",
+          tempPath,
+        ],
+        {
+          cwd: ROOT,
+          encoding: "utf8",
+        }
+      );
 
-    if (result.status !== 0) {
+    if (
+      result.status !== 0
+    ) {
       const details = [
         result.stderr,
         result.stdout,
@@ -7150,7 +8697,9 @@ function assertGeneratedScriptIsComplete(
     try {
       fs.rmSync(
         tempPath,
-        { force: true }
+        {
+          force: true,
+        }
       );
     } catch {}
   }
@@ -7196,7 +8745,9 @@ function tokensFromUrlPath(
       );
 
   return pathText
-    .split(/[/?#&=]+/)
+    .split(
+      /[/?#&=]+/
+    )
     .map(
       (token) =>
         token.trim()
@@ -7218,7 +8769,9 @@ function regexLiteralFromTokens(
     ),
   ];
 
-  if (!usableTokens.length) {
+  if (
+    !usableTokens.length
+  ) {
     return "/.*/";
   }
 
@@ -7226,7 +8779,9 @@ function regexLiteralFromTokens(
     usableTokens
       .map(
         (token) =>
-          escapeRegExp(token)
+          escapeRegExp(
+            token
+          )
       )
       .join("|");
 
@@ -7256,33 +8811,36 @@ function traceNavigationTokens(
         typeof action.url ===
           "string"
     )
-    .flatMap((action) => {
-      try {
-        return tokensFromUrlPath(
-          new URL(
+    .flatMap(
+      (action) => {
+        try {
+          return tokensFromUrlPath(
+            new URL(
+              action.url
+            ).pathname
+          );
+        } catch {
+          return tokensFromUrlPath(
             action.url
-          ).pathname
-        );
-      } catch {
-        return tokensFromUrlPath(
-          action.url
-        );
+          );
+        }
       }
-    });
+    );
 }
 
 function lastTraceNavigationRegex(
   traceText
 ) {
   const navigations =
-    parseTraceActions(traceText)
-      .filter(
-        (action) =>
-          action?.action ===
-            "navigation" &&
-          typeof action.url ===
-            "string"
-      );
+    parseTraceActions(
+      traceText
+    ).filter(
+      (action) =>
+        action?.action ===
+          "navigation" &&
+        typeof action.url ===
+          "string"
+    );
 
   const lastNavigation =
     navigations[
@@ -7319,7 +8877,9 @@ function siteUrlReplacementRegex(
       rawPath
     );
 
-  if (!traceTokens.length) {
+  if (
+    !traceTokens.length
+  ) {
     return regexLiteralFromTokens(
       pathTokens
     );
@@ -7431,7 +8991,11 @@ function replaceUnsupportedUrlRegexAssertions(
         );
 
       return hasUnsupportedToken
-        ? `${prefix}${fallbackRegex}${suffix}`
+        ? (
+            `${prefix}` +
+            `${fallbackRegex}` +
+            `${suffix}`
+          )
         : match;
     }
   );
@@ -7446,29 +9010,32 @@ function replaceInventedSiteUrls(
       traceText
     );
 
-  let updated = script;
+  let updated =
+    script;
 
-  updated = updated.replace(
-    /\b(page\.(?:waitForURL)\(|expect\(page\)\.toHaveURL\()\s*(['"`])https?:\/\/(?:www\.)?(?:site|example|app)\.com(\/[^'"`]*)?\2\s*(\))/g,
-    (
-      _match,
-      prefix,
-      _quote,
-      rawPath = "",
-      suffix
-    ) =>
-      `${prefix}` +
-      `${siteUrlReplacementRegex(
-        rawPath,
-        traceTokens
-      )}` +
-      `${suffix}`
-  );
+  updated =
+    updated.replace(
+      /\b(page\.(?:waitForURL)\(|expect\(page\)\.toHaveURL\()\s*(['"`])https?:\/\/(?:www\.)?(?:site|example|app)\.com(\/[^'"`]*)?\2\s*(\))/g,
+      (
+        _match,
+        prefix,
+        _quote,
+        rawPath = "",
+        suffix
+      ) =>
+        `${prefix}` +
+        `${siteUrlReplacementRegex(
+          rawPath,
+          traceTokens
+        )}` +
+        `${suffix}`
+    );
 
-  updated = updated.replace(
-    /\bpage\.goto\(\s*(['"`])https?:\/\/(?:www\.)?(?:site|example|app)\.com(?:\/[^'"`]*)?\1\s*\)/g,
-    "page.goto(testData.url)"
-  );
+  updated =
+    updated.replace(
+      /\bpage\.goto\(\s*(['"`])https?:\/\/(?:www\.)?(?:site|example|app)\.com(?:\/[^'"`]*)?\1\s*\)/g,
+      "page.goto(testData.url)"
+    );
 
   return updated;
 }
@@ -7520,7 +9087,9 @@ function normalizeDataTestSelectors(
       value
     ) => {
       if (
-        dataCyValues.has(value)
+        dataCyValues.has(
+          value
+        )
       ) {
         return (
           `[data-cy=${quote}` +
@@ -7551,7 +9120,8 @@ function enforceForceClickAfterScroll(
 
   for (
     let index = 0;
-    index < lines.length;
+    index <
+      lines.length;
     index += 1
   ) {
     const scrollMatch =
@@ -7613,7 +9183,9 @@ function enforceWaitForUrlBeforeAssertions(
 
   const updated = [];
 
-  for (const line of lines) {
+  for (
+    const line of lines
+  ) {
     const withoutComment =
       line.replace(
         /\s*\/\/.*$/,
@@ -7666,7 +9238,8 @@ function enforceWaitForUrlBeforeAssertions(
     }
 
     updated.push(
-      withoutComment || line
+      withoutComment ||
+      line
     );
   }
 
@@ -7756,7 +9329,9 @@ function extractReadinessAssertion(
   if (enabledMatch) {
     return {
       expression:
-        enabledMatch[1].trim(),
+        enabledMatch[1]
+          .trim(),
+
       matcher:
         "toBeEnabled",
     };
@@ -7770,7 +9345,9 @@ function extractReadinessAssertion(
   if (editableMatch) {
     return {
       expression:
-        editableMatch[1].trim(),
+        editableMatch[1]
+          .trim(),
+
       matcher:
         "toBeEditable",
     };
@@ -7808,7 +9385,10 @@ function buildLocatorAliasMaps(
   const assignmentPattern =
     /^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(.+?);?$/;
 
-  for (const rawLine of lines) {
+  for (
+    const rawLine of
+    lines
+  ) {
     const line =
       rawLine.trim();
 
@@ -7889,8 +9469,13 @@ function expandEquivalentLocatorExpressions(
     return new Set();
   }
 
-  const queue = [seed];
-  const seen = new Set();
+  const queue = [
+    seed,
+  ];
+
+  const seen =
+    new Set();
+
   const equivalents =
     new Set();
 
@@ -7908,13 +9493,20 @@ function expandEquivalentLocatorExpressions(
     }
 
     seen.add(current);
-    equivalents.add(current);
+
+    equivalents.add(
+      current
+    );
 
     if (
-      locatorMap.has(current)
+      locatorMap.has(
+        current
+      )
     ) {
       queue.push(
-        locatorMap.get(current)
+        locatorMap.get(
+          current
+        )
       );
     }
 
@@ -7931,20 +9523,29 @@ function expandEquivalentLocatorExpressions(
 
     if (aliases) {
       for (
-        const alias of aliases
+        const alias of
+        aliases
       ) {
-        if (!seen.has(alias)) {
+        if (
+          !seen.has(alias)
+        ) {
           queue.push(alias);
         }
 
         if (
-          locatorMap.has(alias) &&
+          locatorMap.has(
+            alias
+          ) &&
           !seen.has(
-            locatorMap.get(alias)
+            locatorMap.get(
+              alias
+            )
           )
         ) {
           queue.push(
-            locatorMap.get(alias)
+            locatorMap.get(
+              alias
+            )
           );
         }
       }
@@ -7969,7 +9570,9 @@ function markReadinessExpression(
 
   if (!equivalents.size) {
     readinessKeys.add(
-      `${normalizeLocatorExpression(expression)}::self`
+      `${normalizeLocatorExpression(
+        expression
+      )}::self`
     );
 
     return;
@@ -7980,7 +9583,9 @@ function markReadinessExpression(
     equivalents
   ) {
     readinessKeys.add(
-      `${normalizeLocatorExpression(equivalent)}::ready`
+      `${normalizeLocatorExpression(
+        equivalent
+      )}::ready`
     );
   }
 }
@@ -8000,7 +9605,9 @@ function hasReadinessExpression(
 
   if (!equivalents.size) {
     return readinessKeys.has(
-      `${normalizeLocatorExpression(expression)}::self`
+      `${normalizeLocatorExpression(
+        expression
+      )}::self`
     );
   }
 
@@ -8010,7 +9617,9 @@ function hasReadinessExpression(
   ) {
     if (
       readinessKeys.has(
-        `${normalizeLocatorExpression(equivalent)}::ready`
+        `${normalizeLocatorExpression(
+          equivalent
+        )}::ready`
       )
     ) {
       return true;
@@ -8030,14 +9639,16 @@ function removeDuplicateInlineVisibilityBeforeClick(
 
   for (
     let index = 0;
-    index < lines.length;
+    index <
+      lines.length;
     index += 1
   ) {
     const currentLine =
       lines[index];
 
     const nextLine =
-      lines[index + 1] || "";
+      lines[index + 1] ||
+      "";
 
     const expectExpression =
       extractExpectVisibleExpression(
@@ -8063,7 +9674,9 @@ function removeDuplicateInlineVisibilityBeforeClick(
       continue;
     }
 
-    updated.push(currentLine);
+    updated.push(
+      currentLine
+    );
   }
 
   return updated.join("\n");
@@ -8072,78 +9685,91 @@ function removeDuplicateInlineVisibilityBeforeClick(
 function enforceSingleTargetTextLocators(
   script
 ) {
-  let updated = script;
+  let updated =
+    script;
 
   const bannedInvalidRoles =
     /page\.getByRole\(\s*(['"])(div|span|section|article|header|footer|main|aside|nav|ul|li|p)\1/g;
 
-  updated = updated.replace(
-    /page\.locator\(\s*(['"])([a-z][a-z0-9-]*)\1\s*\)\.filter\(\s*\{\s*hasText:\s*(\/\^(?:\\\/|[^/\r\n])+?\/[a-z]*)\s*\}\s*\)(?!\s*\.\s*(?:first|nth|last)\s*\()/gi,
-    (match) =>
-      `${match}.first()`
-  );
+  updated =
+    updated.replace(
+      /page\.locator\(\s*(['"])([a-z][a-z0-9-]*)\1\s*\)\.filter\(\s*\{\s*hasText:\s*(\/\^(?:\\\/|[^/\r\n])+?\/[a-z]*)\s*\}\s*\)(?!\s*\.\s*(?:first|nth|last)\s*\()/gi,
+
+      (match) =>
+        `${match}.first()`
+    );
 
   if (
     bannedInvalidRoles.test(
       script
     )
   ) {
-    updated = updated.replace(
-      /page\.getByRole\(\s*(['"])(div|span|section|article|header|footer|main|aside|nav|ul|li|p)\1\s*,\s*\{\s*name\s*:\s*(['"])([^'"]+)\3(?:\s*,\s*exact\s*:\s*true)?\s*\}\s*\)/g,
+    updated =
+      updated.replace(
+        /page\.getByRole\(\s*(['"])(div|span|section|article|header|footer|main|aside|nav|ul|li|p)\1\s*,\s*\{\s*name\s*:\s*(['"])([^'"]+)\3(?:\s*,\s*exact\s*:\s*true)?\s*\}\s*\)/g,
+        (
+          _match,
+          _q1,
+          tag,
+          _q2,
+          text
+        ) =>
+          `page.locator('${tag}')` +
+          `.filter(` +
+          `${exactTextRegexObject(
+            text
+          )}` +
+          `).first()`
+      );
+  }
+
+  updated =
+    updated.replace(
+      /page\.getByText\(\s*(['"])([^'"]+)\1\s*,\s*\{\s*exact\s*:\s*true\s*\}\s*\)(?!\s*\.\s*(?:first|nth|last)\s*\()/g,
       (
         _match,
-        _q1,
+        quote,
+        text
+      ) =>
+        `page.getByText(` +
+        `${quote}${text}${quote}, ` +
+        `{ exact: true }).first()`
+    );
+
+  updated =
+    updated.replace(
+      /page\.locator\(\s*(['"])div\1\s*\)\.filter\(\s*\{\s*hasText:\s*(['"])([^'"]+)\2\s*\}\s*\)\.first\(\)/g,
+      (
+        _match,
+        _divQuote,
+        _textQuote,
+        text
+      ) =>
+        `page.locator('div')` +
+        `.filter(` +
+        `${exactTextRegexObject(
+          text
+        )}` +
+        `).first()`
+    );
+
+  updated =
+    updated.replace(
+      /page\.locator\(\s*(['"])([a-z][a-z0-9-]*)\1\s*\)\.filter\(\s*\{\s*hasText:\s*(['"])([^'"]+)\3\s*\}\s*\)(?!\s*\.\s*(?:first|nth|last)\s*\()/gi,
+      (
+        _match,
+        _tagQuote,
         tag,
-        _q2,
+        _textQuote,
         text
       ) =>
         `page.locator('${tag}')` +
         `.filter(` +
-        `${exactTextRegexObject(text)}` +
+        `${exactTextRegexObject(
+          text
+        )}` +
         `).first()`
     );
-  }
-
-  updated = updated.replace(
-    /page\.getByText\(\s*(['"])([^'"]+)\1\s*,\s*\{\s*exact\s*:\s*true\s*\}\s*\)(?!\s*\.\s*(?:first|nth|last)\s*\()/g,
-    (
-      _match,
-      quote,
-      text
-    ) =>
-      `page.getByText(` +
-      `${quote}${text}${quote}, ` +
-      `{ exact: true }).first()`
-  );
-
-  updated = updated.replace(
-    /page\.locator\(\s*(['"])div\1\s*\)\.filter\(\s*\{\s*hasText:\s*(['"])([^'"]+)\2\s*\}\s*\)\.first\(\)/g,
-    (
-      _match,
-      _divQuote,
-      _textQuote,
-      text
-    ) =>
-      `page.locator('div')` +
-      `.filter(` +
-      `${exactTextRegexObject(text)}` +
-      `).first()`
-  );
-
-  updated = updated.replace(
-    /page\.locator\(\s*(['"])([a-z][a-z0-9-]*)\1\s*\)\.filter\(\s*\{\s*hasText:\s*(['"])([^'"]+)\3\s*\}\s*\)(?!\s*\.\s*(?:first|nth|last)\s*\()/gi,
-    (
-      _match,
-      _tagQuote,
-      tag,
-      _textQuote,
-      text
-    ) =>
-      `page.locator('${tag}')` +
-      `.filter(` +
-      `${exactTextRegexObject(text)}` +
-      `).first()`
-  );
 
   return updated;
 }
@@ -8162,7 +9788,8 @@ function enforceDomContentLoadedAfterNavigation(
     for (
       let index =
         startIndex;
-      index < lines.length;
+      index <
+        lines.length;
       index += 1
     ) {
       const text =
@@ -8178,7 +9805,8 @@ function enforceDomContentLoadedAfterNavigation(
 
   for (
     let index = 0;
-    index < lines.length;
+    index <
+      lines.length;
     index += 1
   ) {
     const line =
@@ -8216,7 +9844,8 @@ function enforceDomContentLoadedAfterNavigation(
       const indent =
         line.match(
           /^(\s*)/
-        )?.[1] || "";
+        )?.[1] ||
+        "";
 
       updated.push(
         `${indent}await page.waitForLoadState(` +
@@ -8246,7 +9875,9 @@ function removeGeneratedCommentLines(
 
   const kept = [];
 
-  for (const line of lines) {
+  for (
+    const line of lines
+  ) {
     const trimmed =
       line.trim();
 
@@ -8281,11 +9912,13 @@ function removeStandaloneAnonymousButtonPairs(
 
   for (
     let index = 0;
-    index < lines.length;
+    index <
+      lines.length;
     index += 1
   ) {
     const current =
-      lines[index].trim();
+      lines[index]
+        .trim();
 
     const next =
       (
@@ -8317,9 +9950,15 @@ function removeStandaloneAnonymousButtonPairs(
     ) {
       const surrounding = [
         prev,
-        lines[index + 2] || "",
-        lines[index + 3] || "",
-        lines[index + 4] || "",
+
+        lines[index + 2] ||
+        "",
+
+        lines[index + 3] ||
+        "",
+
+        lines[index + 4] ||
+        "",
       ].join("\n");
 
       const hasNamedControlNearby =
@@ -8334,6 +9973,7 @@ function removeStandaloneAnonymousButtonPairs(
         hasNamedControlNearby
       ) {
         index += 1;
+
         continue;
       }
     }
@@ -8365,8 +10005,11 @@ function collapseRepeatedFillCalls(
       .split(/\r?\n/);
 
   const output = [];
+
   let fillRun = [];
-  let fillRunKey = "";
+
+  let fillRunKey =
+    "";
 
   const flushFillRun = () => {
     if (!fillRun.length) {
@@ -8380,19 +10023,16 @@ function collapseRepeatedFillCalls(
     );
 
     fillRun = [];
+
     fillRunKey = "";
   };
 
-  for (const line of lines) {
+  for (
+    const line of lines
+  ) {
     const trimmed =
       line.trim();
 
-    /*
-     * Match both:
-     *
-     * .fill("literal")
-     * .fill(testData.password)
-     */
     const fillMatch =
       trimmed.match(
         /^await\s+(.+?)\.fill\(\s*[\s\S]*\);\s*$/
@@ -8400,11 +10040,15 @@ function collapseRepeatedFillCalls(
 
     if (fillMatch) {
       const target =
-        fillMatch[1].trim();
+        fillMatch[1]
+          .trim();
 
       if (!fillRun.length) {
-        fillRunKey = target;
+        fillRunKey =
+          target;
+
         fillRun.push(line);
+
         continue;
       }
 
@@ -8412,16 +10056,22 @@ function collapseRepeatedFillCalls(
         target === fillRunKey
       ) {
         fillRun.push(line);
+
         continue;
       }
 
       flushFillRun();
-      fillRunKey = target;
+
+      fillRunKey =
+        target;
+
       fillRun.push(line);
+
       continue;
     }
 
     flushFillRun();
+
     output.push(line);
   }
 
@@ -8443,15 +10093,13 @@ function inlineLocatorVariablesAndRemoveAssertions(
   const declarationPattern =
     /^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(.+?)\s*;\s*$/;
 
-  /*
-   * First collect declarations such as:
-   *
-   * const passwordInput =
-   *   page.getByRole(...);
-   */
-  for (const line of lines) {
+  for (
+    const line of lines
+  ) {
     const match =
-      declarationPattern.exec(line);
+      declarationPattern.exec(
+        line
+      );
 
     if (!match) {
       continue;
@@ -8480,15 +10128,15 @@ function inlineLocatorVariablesAndRemoveAssertions(
 
   const output = [];
 
-  for (const originalLine of lines) {
+  for (
+    const originalLine of
+    lines
+  ) {
     const declarationMatch =
       declarationPattern.exec(
         originalLine
       );
 
-    /*
-     * Remove locator declarations.
-     */
     if (
       declarationMatch &&
       locatorAliases.has(
@@ -8501,12 +10149,6 @@ function inlineLocatorVariablesAndRemoveAssertions(
     const trimmed =
       originalLine.trim();
 
-    /*
-     * Remove generated readiness assertions.
-     *
-     * These assertions can touch controls before
-     * the click that makes those controls available.
-     */
     if (
       /^await\s+expect\(.+\)\.(?:toBeEditable|toBeEnabled|toBeVisible|toBeAttached)\(\);\s*$/.test(
         trimmed
@@ -8518,15 +10160,6 @@ function inlineLocatorVariablesAndRemoveAssertions(
     let updatedLine =
       originalLine;
 
-    /*
-     * Replace:
-     *
-     * await passwordInput.fill(...)
-     *
-     * with:
-     *
-     * await page.getByRole(...).fill(...)
-     */
     for (
       const [
         variableName,
@@ -8535,7 +10168,9 @@ function inlineLocatorVariablesAndRemoveAssertions(
     ) {
       const variablePattern =
         new RegExp(
-          `\\b${escapeRegExp(variableName)}\\b`,
+          `\\b${escapeRegExp(
+            variableName
+          )}\\b`,
           "g"
         );
 
@@ -8546,12 +10181,11 @@ function inlineLocatorVariablesAndRemoveAssertions(
         );
     }
 
-    output.push(updatedLine);
+    output.push(
+      updatedLine
+    );
   }
 
-  /*
-   * Collapse excessive empty lines.
-   */
   return output
     .join("\n")
     .replace(
@@ -8569,7 +10203,17 @@ function postProcessGeneratedScript(
   testDataModel
 ) {
   let cleaned =
-    cleanLlmOutput(rawOutput);
+    cleanLlmOutput(
+      rawOutput
+    );
+
+  /*
+   * Remove invented selection operations immediately.
+   */
+  cleaned =
+    removeCheckAndToBeCheckedStatements(
+      cleaned
+    );
 
   cleaned =
     removeStandaloneFocusSteps(
@@ -8688,10 +10332,6 @@ function postProcessGeneratedScript(
       {}
     );
 
-  /*
-   * Do not silently delete incomplete XPath lines.
-   * Let the JavaScript syntax validator reject them.
-   */
   cleaned =
     repairUndeclaredLocatorVariables(
       cleaned,
@@ -8699,32 +10339,16 @@ function postProcessGeneratedScript(
       codegen
     );
 
-  /*
-   * Remove const locator variables and every generated
-   * readiness assertion before positioning TRACE clicks.
-   *
-   * This prevents the password field from being resolved
-   * before the Continue button has been clicked.
-   */
   cleaned =
     inlineLocatorVariablesAndRemoveAssertions(
       cleaned
     );
 
-  /*
-   * Collapse repeated generated fills for the same
-   * control before mapping normalized TRACE actions.
-   */
   cleaned =
     collapseRepeatedFillCalls(
       cleaned
     );
 
-  /*
-   * Remove malformed model fragments such as:
-   *
-   * await page.locator("xpath=
-   */
   cleaned =
     removeMalformedXPathLocatorFragments(
       cleaned
@@ -8739,10 +10363,6 @@ function postProcessGeneratedScript(
       trace
     );
 
-  /*
-   * Keep data-driven rewriting, but do not add automatic
-   * toBeEnabled()/toBeEditable() assertions afterward.
-   */
   cleaned =
     normalizeDataTestSelectors(
       enforceDataDriven(
@@ -8751,6 +10371,18 @@ function postProcessGeneratedScript(
       ),
       codegen
     );
+
+  /*
+   * Final deterministic cleanup after every transformation.
+   */
+  cleaned =
+    removeCheckAndToBeCheckedStatements(
+      cleaned
+    );
+
+  assertNoCheckOrToBeChecked(
+    cleaned
+  );
 
   return cleaned;
 }
@@ -8783,7 +10415,10 @@ function extractRepairContext(
   if (!brokenLine) {
     return text
       .split(/\r?\n/)
-      .slice(0, 24)
+      .slice(
+        0,
+        24
+      )
       .join("\n");
   }
 
@@ -8804,7 +10439,9 @@ function extractRepairContext(
         )
     );
 
-  if (brokenIndex < 0) {
+  if (
+    brokenIndex < 0
+  ) {
     return brokenLine;
   }
 
@@ -8821,7 +10458,10 @@ function extractRepairContext(
     );
 
   return lines
-    .slice(start, end)
+    .slice(
+      start,
+      end
+    )
     .join("\n");
 }
 
@@ -8871,11 +10511,17 @@ ${formatRecordedClickXPaths(trace)}
 
 9. Do not use CODEGEN locators for click actions.
 
-10. Do not convert clicks into check(), focus(), selectOption(), assertions, waits, or helper calls.
+10. Do not convert clicks into focus(), selectOption(), assertions, waits, or helper calls.
 
-11. Non-click actions may continue using appropriate TRACE or CODEGEN locators.
+11. Do not generate .check() calls anywhere in the script.
 
-12. Every generated click XPath must be copied character-for-character.
+12. Do not generate toBeChecked() assertions anywhere in the script.
+
+13. Checkbox and radio interactions recorded as TRACE clicks must remain direct XPath clicks.
+
+14. Non-click actions may continue using appropriate TRACE or CODEGEN locators, except .check() and toBeChecked(), which are forbidden.
+
+15. Every generated click XPath must be copied character-for-character.
 
 VALIDATION ERROR:
 ${validationError}
@@ -8909,7 +10555,8 @@ async function generateValidatedScript({
   let prompt =
     finalPrompt;
 
-  let lastError = null;
+  let lastError =
+    null;
 
   for (
     let attempt = 1;
@@ -8917,7 +10564,9 @@ async function generateValidatedScript({
     attempt += 1
   ) {
     const rawOutput =
-      await callGroq(prompt);
+      await callGroq(
+        prompt
+      );
 
     const cleaned =
       postProcessGeneratedScript(
@@ -8939,6 +10588,10 @@ async function generateValidatedScript({
         );
       }
 
+      assertNoCheckOrToBeChecked(
+        cleaned
+      );
+
       assertGeneratedScriptIsComplete(
         cleaned,
         outputPath
@@ -8951,9 +10604,12 @@ async function generateValidatedScript({
 
       return cleaned;
     } catch (error) {
-      lastError = error;
+      lastError =
+        error;
 
-      if (attempt === 3) {
+      if (
+        attempt === 3
+      ) {
         break;
       }
 
@@ -8971,11 +10627,14 @@ async function generateValidatedScript({
           sanitizedTrace,
           sanitizedCodegen,
           testName,
+
           invalidScript:
             cleaned,
+
           validationError:
             error.message ||
             String(error),
+
           testDataModel,
         });
     }
@@ -8989,7 +10648,9 @@ async function generateValidatedScript({
   );
 }
 
-async function callGroq(prompt) {
+async function callGroq(
+  prompt
+) {
   for (
     let attempt = 0;
     attempt < 3;
@@ -9018,7 +10679,9 @@ async function callGroq(prompt) {
         errorText.includes(
           "rate_limit"
         ) ||
-        errorText.includes("429");
+        errorText.includes(
+          "429"
+        );
 
       if (
         !isRateLimit ||
@@ -9035,9 +10698,12 @@ async function callGroq(prompt) {
       const waitMs =
         match
           ? (
-              Number(match[1]) +
+              Number(
+                match[1]
+              ) +
               1
-            ) * 1000
+            ) *
+            1000
           : 20000;
 
       console.log(
@@ -9068,30 +10734,34 @@ function emitLlmUsageSummary() {
       llmUsageSummary
     );
 
-  if (summary.calls > 0) {
+  if (
+    summary.calls > 0
+  ) {
     console.log(
       `[llm-usage] ` +
-      `${JSON.stringify(summary)}`
+      `${JSON.stringify(
+        summary
+      )}`
     );
   }
 }
 
-/*
- * Static plain templates are disabled.
- * Every filename now uses the normal LLM and validation path.
- */
 const TEMPLATE_OVERRIDES = [];
 
 function findTemplateOverride(
   outputPath
 ) {
   const fileName =
-    path.basename(outputPath);
+    path.basename(
+      outputPath
+    );
 
   return (
     TEMPLATE_OVERRIDES.find(
       (override) =>
-        override.match(fileName)
+        override.match(
+          fileName
+        )
     ) ||
     null
   );
@@ -9099,7 +10769,9 @@ function findTemplateOverride(
 
 function applyTemplate(
   templateContent,
-  { testName }
+  {
+    testName,
+  }
 ) {
   return templateContent.replace(
     /\{\{TEST_NAME\}\}/g,
@@ -9112,7 +10784,8 @@ function seedTemplateTestDataFileIfMissing(
   override
 ) {
   if (
-    !override?.testDataTemplate
+    !override
+      ?.testDataTemplate
   ) {
     return null;
   }
@@ -9152,7 +10825,9 @@ function seedTemplateTestDataFileIfMissing(
     path.dirname(
       testDataPath
     ),
-    { recursive: true }
+    {
+      recursive: true,
+    }
   );
 
   fs.copyFileSync(
@@ -9182,7 +10857,9 @@ async function useTemplate(
   console.log(
     `Template match: ` +
     `"${override.template}" ` +
-    `(matched ${path.basename(outputPath)}).`
+    `(matched ${path.basename(
+      outputPath
+    )}).`
   );
 
   console.log(
@@ -9217,12 +10894,16 @@ async function useTemplate(
   }
 
   const templateRaw =
-    loadFile(templatePath);
+    loadFile(
+      templatePath
+    );
 
   const resolved =
     applyTemplate(
       templateRaw,
-      { testName }
+      {
+        testName,
+      }
     );
 
   console.log(
@@ -9230,8 +10911,12 @@ async function useTemplate(
   );
 
   fs.mkdirSync(
-    path.dirname(outputPath),
-    { recursive: true }
+    path.dirname(
+      outputPath
+    ),
+    {
+      recursive: true,
+    }
   );
 
   seedTemplateTestDataFileIfMissing(
@@ -9245,11 +10930,20 @@ async function useTemplate(
       codegen
     );
 
-  const templateWithClicks =
+  let templateWithClicks =
     rebuildRecordedClicksFromTrace(
       resolved,
       trace
     );
+
+  templateWithClicks =
+    removeCheckAndToBeCheckedStatements(
+      templateWithClicks
+    );
+
+  assertNoCheckOrToBeChecked(
+    templateWithClicks
+  );
 
   const testDataResult =
     writeTestDataFile(
@@ -9260,19 +10954,28 @@ async function useTemplate(
       testDataModel
     );
 
+  const finalTemplateScript =
+    removeCheckAndToBeCheckedStatements(
+      testDataResult.scriptText
+    );
+
+  assertNoCheckOrToBeChecked(
+    finalTemplateScript
+  );
+
   assertGeneratedScriptIsComplete(
-    testDataResult.scriptText,
+    finalTemplateScript,
     outputPath
   );
 
   assertClicksUseRecordedXPaths(
-    testDataResult.scriptText,
+    finalTemplateScript,
     trace
   );
 
   fs.writeFileSync(
     outputPath,
-    testDataResult.scriptText,
+    finalTemplateScript,
     "utf8"
   );
 
@@ -9280,12 +10983,13 @@ async function useTemplate(
     "Generating heal-wrapped version..."
   );
 
-  let healedPath = null;
+  let healedPath =
+    null;
 
   try {
     healedPath =
       await generateAndWriteHealedSpec(
-        testDataResult.scriptText,
+        finalTemplateScript,
         outputPath
       );
   } catch (error) {
@@ -9336,9 +11040,13 @@ async function main() {
     );
 
   if (
-    fs.existsSync(tracePath) &&
+    fs.existsSync(
+      tracePath
+    ) &&
     fs
-      .statSync(tracePath)
+      .statSync(
+        tracePath
+      )
       .isDirectory()
   ) {
     const pair =
@@ -9357,9 +11065,13 @@ async function main() {
       pair.tracePath;
 
     if (
-      fs.existsSync(codegenPath) &&
+      fs.existsSync(
+        codegenPath
+      ) &&
       fs
-        .statSync(codegenPath)
+        .statSync(
+          codegenPath
+        )
         .isDirectory()
     ) {
       codegenPath =
@@ -9368,9 +11080,13 @@ async function main() {
   }
 
   if (
-    fs.existsSync(codegenPath) &&
+    fs.existsSync(
+      codegenPath
+    ) &&
     fs
-      .statSync(codegenPath)
+      .statSync(
+        codegenPath
+      )
       .isDirectory()
   ) {
     const pair =
@@ -9389,9 +11105,13 @@ async function main() {
       pair.codegenPath;
 
     if (
-      fs.existsSync(tracePath) &&
+      fs.existsSync(
+        tracePath
+      ) &&
       fs
-        .statSync(tracePath)
+        .statSync(
+          tracePath
+        )
         .isDirectory()
     ) {
       tracePath =
@@ -9400,9 +11120,13 @@ async function main() {
   }
 
   if (
-    !fs.existsSync(tracePath) ||
+    !fs.existsSync(
+      tracePath
+    ) ||
     fs
-      .statSync(tracePath)
+      .statSync(
+        tracePath
+      )
       .isDirectory()
   ) {
     throw new Error(
@@ -9412,9 +11136,13 @@ async function main() {
   }
 
   if (
-    !fs.existsSync(codegenPath) ||
+    !fs.existsSync(
+      codegenPath
+    ) ||
     fs
-      .statSync(codegenPath)
+      .statSync(
+        codegenPath
+      )
       .isDirectory()
   ) {
     throw new Error(
@@ -9435,6 +11163,7 @@ async function main() {
   const outputPath =
     buildOutputPath(
       args.output,
+
       testName ||
       deriveTestName(
         codegenPath
@@ -9453,14 +11182,11 @@ async function main() {
     `Codegen input path: ${codegenPath}`
   );
 
-  /*
-   * Remove stale output before generation.
-   * If validation fails, an older invalid file will
-   * not remain and appear to be the new result.
-   */
   fs.rmSync(
     outputPath,
-    { force: true }
+    {
+      force: true,
+    }
   );
 
   console.log(
@@ -9468,10 +11194,14 @@ async function main() {
   );
 
   const trace =
-    loadFile(tracePath);
+    loadFile(
+      tracePath
+    );
 
   const codegen =
-    loadFile(codegenPath);
+    loadFile(
+      codegenPath
+    );
 
   const override =
     findTemplateOverride(
@@ -9504,17 +11234,17 @@ async function main() {
       codegen
     );
 
-  /*
-   * Validate the raw TRACE click contract before
-   * making an API request.
-   */
   collectRecordedClickXPaths(
     trace
   );
 
   assertRefineInputsAreUsable({
-    traceText: trace,
-    codegenText: codegen,
+    traceText:
+      trace,
+
+    codegenText:
+      codegen,
+
     sanitizedTrace,
     sanitizedCodegen,
     tracePath,
@@ -9578,8 +11308,12 @@ async function main() {
   );
 
   fs.mkdirSync(
-    path.dirname(outputPath),
-    { recursive: true }
+    path.dirname(
+      outputPath
+    ),
+    {
+      recursive: true,
+    }
   );
 
   const testDataResult =
@@ -9591,23 +11325,31 @@ async function main() {
       testDataModel
     );
 
+  /*
+   * Last protection immediately before writing the file.
+   */
+  const finalScriptText =
+    removeCheckAndToBeCheckedStatements(
+      testDataResult.scriptText
+    );
+
+  assertNoCheckOrToBeChecked(
+    finalScriptText
+  );
+
   assertGeneratedScriptIsComplete(
-    testDataResult.scriptText,
+    finalScriptText,
     outputPath
   );
 
-  /*
-   * Validate again after testData rewriting and
-   * immediately before writing the final spec.
-   */
   assertClicksUseRecordedXPaths(
-    testDataResult.scriptText,
+    finalScriptText,
     trace
   );
 
   fs.writeFileSync(
     outputPath,
-    testDataResult.scriptText,
+    finalScriptText,
     "utf8"
   );
 
@@ -9615,12 +11357,13 @@ async function main() {
     "Generating heal-wrapped version..."
   );
 
-  let healedPath = null;
+  let healedPath =
+    null;
 
   try {
     healedPath =
       await generateAndWriteHealedSpec(
-        testDataResult.scriptText,
+        finalScriptText,
         outputPath
       );
   } catch (error) {
@@ -9660,21 +11403,24 @@ async function main() {
   emitLlmUsageSummary();
 }
 
-main().catch((error) => {
-  console.error(
-    `refine-with-llm failed: ` +
-    `${
-      error.message ||
-      String(error)
-    }`
-  );
-
-  if (error?.stack) {
+main().catch(
+  (error) => {
     console.error(
-      error.stack
+      `refine-with-llm failed: ` +
+      `${
+        error.message ||
+        String(error)
+      }`
     );
-  }
 
-  emitLlmUsageSummary();
-  process.exit(1);
-});
+    if (error?.stack) {
+      console.error(
+        error.stack
+      );
+    }
+
+    emitLlmUsageSummary();
+
+    process.exit(1);
+  }
+);
