@@ -8,9 +8,114 @@ const {
     webkit
 } = require("@playwright/test");
 
-const {
-    injectListeners
-} = require("./src/utils/listeners");
+const listenersModule =
+    require("./src/utils/listeners");
+
+/**
+ * Supports either listeners.js export style:
+ *
+ *     module.exports = {
+ *         injectListeners
+ *     };
+ *
+ * or:
+ *
+ *     module.exports = injectListeners;
+ */
+function resolveInjectListeners(
+    moduleValue
+) {
+    if (
+        typeof moduleValue ===
+        "function"
+    ) {
+        return moduleValue;
+    }
+
+    if (
+        moduleValue &&
+        typeof moduleValue
+            .injectListeners ===
+            "function"
+    ) {
+        return moduleValue
+            .injectListeners;
+    }
+
+    const exportedKeys =
+        moduleValue &&
+        typeof moduleValue ===
+            "object"
+            ? Object.keys(
+                moduleValue
+            )
+            : [];
+
+    throw new TypeError(
+        [
+            "Could not load injectListeners from ./src/utils/listeners.",
+            `Received module type: ${typeof moduleValue}`,
+            `Exported keys: ${
+                exportedKeys.length
+                    ? exportedKeys.join(", ")
+                    : "(none)"
+            }`,
+            "",
+            "listeners.js must export either:",
+            "",
+            "module.exports = { injectListeners };",
+            "",
+            "or:",
+            "",
+            "module.exports = injectListeners;"
+        ].join("\n")
+    );
+}
+
+const injectListeners =
+    resolveInjectListeners(
+        listenersModule
+    );
+
+/**
+ * Explicitly serialize the listener function into executable browser-side
+ * JavaScript.
+ *
+ * This avoids passing an undefined or unsupported module value directly to
+ * BrowserContext.addInitScript().
+ */
+function createListenerInitScript(
+    listenerFunction
+) {
+    const functionSource =
+        Function.prototype
+            .toString
+            .call(
+                listenerFunction
+            )
+            .trim();
+
+    if (
+        !functionSource ||
+        functionSource.includes(
+            "[native code]"
+        )
+    ) {
+        throw new TypeError(
+            "injectListeners could not be serialized into browser-side JavaScript."
+        );
+    }
+
+    return (
+        `"use strict";\n` +
+        `(${functionSource})();`
+    );
+}
+
+const LISTENER_INIT_SCRIPT =
+    createListenerInitScript(
+        injectListeners
+    );
 
 const DEFAULT_URL =
     process.argv[2] ||
@@ -32,7 +137,8 @@ const OUT_DIR =
         "codegen-output"
     );
 
-const FINALIZE_ENQUEUE_GRACE_MS = 500;
+const FINALIZE_ENQUEUE_GRACE_MS =
+    500;
 
 const SELECTOR_REQUIRED_ACTIONS =
     new Set([
@@ -47,7 +153,9 @@ const SELECTOR_REQUIRED_ACTIONS =
 
 const actions = [];
 
-function cleanOutputDirectory(dirPath) {
+function cleanOutputDirectory(
+    dirPath
+) {
     fs.mkdirSync(
         dirPath,
         {
@@ -77,13 +185,21 @@ function cleanOutputDirectory(dirPath) {
     }
 }
 
-function omitNullFields(value) {
-    if (Array.isArray(value)) {
+function omitNullFields(
+    value
+) {
+    if (
+        Array.isArray(
+            value
+        )
+    ) {
         const cleanedItems =
             value
-                .map(omitNullFields)
+                .map(
+                    omitNullFields
+                )
                 .filter(
-                    (item) =>
+                    item =>
                         item !== null
                 );
 
@@ -94,10 +210,13 @@ function omitNullFields(value) {
 
     if (
         value &&
-        typeof value === "object"
+        typeof value ===
+            "object"
     ) {
         const cleanedEntries =
-            Object.entries(value)
+            Object.entries(
+                value
+            )
                 .map(
                     ([
                         key,
@@ -114,7 +233,8 @@ function omitNullFields(value) {
                         ,
                         entryValue
                     ]) =>
-                        entryValue !== null
+                        entryValue !==
+                        null
                 );
 
         return cleanedEntries.length
@@ -124,7 +244,8 @@ function omitNullFields(value) {
             : null;
     }
 
-    return value === undefined
+    return value ===
+        undefined
         ? null
         : value;
 }
@@ -144,7 +265,7 @@ function timestamp() {
 
 function delay(ms) {
     return new Promise(
-        (resolve) =>
+        resolve =>
             setTimeout(
                 resolve,
                 ms
@@ -152,8 +273,12 @@ function delay(ms) {
     );
 }
 
-function resolveBrowserLaunch(browserName) {
-    switch (browserName) {
+function resolveBrowserLaunch(
+    browserName
+) {
+    switch (
+        browserName
+    ) {
         case "chromium":
             return {
                 browserType:
@@ -163,7 +288,8 @@ function resolveBrowserLaunch(browserName) {
                     "chromium",
 
                 launchOptions: {
-                    headless: false
+                    headless:
+                        false
                 }
             };
 
@@ -176,7 +302,8 @@ function resolveBrowserLaunch(browserName) {
                     "firefox",
 
                 launchOptions: {
-                    headless: false
+                    headless:
+                        false
                 }
             };
 
@@ -189,7 +316,8 @@ function resolveBrowserLaunch(browserName) {
                     "webkit",
 
                 launchOptions: {
-                    headless: false
+                    headless:
+                        false
                 }
             };
 
@@ -230,7 +358,9 @@ function resolveBrowserLaunch(browserName) {
     }
 }
 
-function parseViewport(value) {
+function parseViewport(
+    value
+) {
     const text =
         String(
             value ||
@@ -255,10 +385,14 @@ function parseViewport(value) {
     }
 
     const width =
-        Number(match[1]);
+        Number(
+            match[1]
+        );
 
     const height =
-        Number(match[2]);
+        Number(
+            match[2]
+        );
 
     if (
         width < 320 ||
@@ -280,17 +414,20 @@ function parseViewport(value) {
 /**
  * Accepts either:
  *
- *     //button[@aria-label='Submit']
+ *     //button[@*[name()='custom-key' and .='submit']]
  *
  * or:
  *
- *     xpath=//button[@aria-label='Submit']
+ *     xpath=//button[@*[name()='custom-key' and .='submit']]
  *
  * Returns only the raw XPath expression.
  */
-function normalizeXPath(value) {
+function normalizeXPath(
+    value
+) {
     if (
-        typeof value !== "string"
+        typeof value !==
+        "string"
     ) {
         return "";
     }
@@ -311,22 +448,22 @@ function normalizeXPath(value) {
 /**
  * Click selectors must always be XPath selectors.
  *
- * Accepted:
+ * The selector may be generated from:
  *
- *     xpath=//button[@id='save']
- *     //button[@id='save']
- *     (//button)[57]
- *
- * Rejected:
- *
- *     #save
- *     text=Save
- *     [aria-label="Save"]
- *     role=button[name="Save"]
+ * - any locally discovered unique attribute;
+ * - starts-with() or contains();
+ * - normalize-space(.) as a lower-priority fallback;
+ * - ancestor/descendant relationships;
+ * - following-sibling:: or preceding-sibling::;
+ * - following:: or preceding::;
+ * - an indexed structural fallback.
  */
-function normalizeClickSelector(value) {
+function normalizeClickSelector(
+    value
+) {
     if (
-        typeof value !== "string"
+        typeof value !==
+        "string"
     ) {
         return "";
     }
@@ -338,9 +475,15 @@ function normalizeClickSelector(value) {
         return "";
     }
 
-    if (/^xpath=/i.test(trimmed)) {
+    if (
+        /^xpath=/i.test(
+            trimmed
+        )
+    ) {
         const xpath =
-            normalizeXPath(trimmed);
+            normalizeXPath(
+                trimmed
+            );
 
         return xpath
             ? `xpath=${xpath}`
@@ -348,17 +491,26 @@ function normalizeClickSelector(value) {
     }
 
     if (
-        trimmed.startsWith("/") ||
-        trimmed.startsWith("(")
+        trimmed.startsWith(
+            "/"
+        ) ||
+        trimmed.startsWith(
+            "("
+        )
     ) {
-        return `xpath=${trimmed}`;
+        return (
+            `xpath=${trimmed}`
+        );
     }
 
     return "";
 }
 
-function removeInternalClickFields(action) {
+function removeInternalClickFields(
+    action
+) {
     delete action.clickId;
+    delete action.xpathKey;
     delete action.sequence;
 
     delete action.capturedAction;
@@ -374,13 +526,11 @@ function removeInternalClickFields(action) {
     delete action.normal_xpath;
 
     /*
-     * Click output contains:
+     * Final click output contains:
      *
      * selector
      * primary_xpath
      * backup_xpath
-     *
-     * There must not be an additional xpath property.
      */
     delete action.xpath;
 
@@ -393,17 +543,19 @@ function removeInternalClickFields(action) {
 }
 
 /**
- * Builds the final click action from values generated and validated before
- * the click in listeners.js.
+ * Builds the final click action exclusively from locator values generated
+ * and validated before the physical click in listeners.js.
  *
- * This function deliberately does not inspect or recalculate anything from
- * the post-click DOM.
+ * This function does not inspect the post-click DOM.
  */
-function buildAcceptedClickAction(job) {
+function buildAcceptedClickAction(
+    job
+) {
     const capturedAction =
         (
             job?.capturedAction &&
-            typeof job.capturedAction ===
+            typeof job
+                .capturedAction ===
                 "object"
         )
             ? {
@@ -432,17 +584,20 @@ function buildAcceptedClickAction(job) {
     /*
      * selector:
      *
-     * Normal XPath generated before the click by listeners.js.
+     * The graph-generated normal XPath produced and validated before the
+     * click.
      */
     const selector =
         normalizeClickSelector(
             job?.selector ||
-            capturedAction?.selector
+            capturedAction
+                ?.selector
         );
 
     if (!selector) {
         return {
-            accepted: false,
+            accepted:
+                false,
 
             reason:
                 "Click contains no valid XPath selector"
@@ -452,10 +607,8 @@ function buildAcceptedClickAction(job) {
     /*
      * backup_xpath:
      *
-     * Positional XPath calculated and validated against the exact element
-     * before the click, for example:
-     *
-     *     (//span)[191]
+     * Positional XPath produced and validated against the exact target before
+     * the click.
      */
     const backupXPath =
         normalizeXPath(
@@ -469,7 +622,8 @@ function buildAcceptedClickAction(job) {
 
     if (!backupXPath) {
         return {
-            accepted: false,
+            accepted:
+                false,
 
             reason:
                 "Click contains no backup_xpath"
@@ -479,10 +633,10 @@ function buildAcceptedClickAction(job) {
     /*
      * primary_xpath:
      *
-     * Normalize-space-based XPath generated before the click.
+     * Independently generated normalize-space XPath.
      *
-     * If no normalize-space XPath existed, listeners.js supplies
-     * backup_xpath as primary_xpath.
+     * listeners.js supplies backup_xpath when no valid normalize-space XPath
+     * can be generated.
      */
     const primaryXPath =
         normalizeXPath(
@@ -499,10 +653,6 @@ function buildAcceptedClickAction(job) {
         primaryXPath ===
         backupXPath;
 
-    /*
-     * A primary XPath that is not the backup fallback must contain
-     * normalize-space().
-     */
     if (
         !primaryIsBackup &&
         !/normalize-space\s*\(/i.test(
@@ -510,7 +660,8 @@ function buildAcceptedClickAction(job) {
         )
     ) {
         return {
-            accepted: false,
+            accepted:
+                false,
 
             reason:
                 "primary_xpath is neither normalize-space-based nor equal to backup_xpath"
@@ -524,26 +675,19 @@ function buildAcceptedClickAction(job) {
             action:
                 "click",
 
-            /*
-             * Preserve the pre-click normal XPath.
-             */
             selector,
 
-            /*
-             * Preserve the pre-click normalize-space XPath or backup fallback.
-             */
             primary_xpath:
                 primaryXPath,
 
-            /*
-             * Preserve the pre-click positional XPath exactly.
-             */
             backup_xpath:
                 backupXPath
         });
 
     return {
-        accepted: true,
+        accepted:
+            true,
+
         action,
 
         selector:
@@ -557,27 +701,39 @@ function buildAcceptedClickAction(job) {
     };
 }
 
-function buildActionKey(action) {
-    if (!action?.action) {
+function buildActionKey(
+    action
+) {
+    if (
+        !action?.action
+    ) {
         return "";
     }
 
-    switch (action.action) {
+    switch (
+        action.action
+    ) {
         case "navigation":
             return [
                 action.action,
                 action.url ||
                     ""
-            ].join("::");
+            ].join(
+                "::"
+            );
 
         case "scroll":
             return [
                 action.action,
-                action.scrollPercent ??
+                action
+                    .scrollPercent ??
                     "",
-                action.maxScrollY ??
+                action
+                    .maxScrollY ??
                     ""
-            ].join("::");
+            ].join(
+                "::"
+            );
 
         case "input":
             return [
@@ -586,7 +742,9 @@ function buildActionKey(action) {
                     "",
                 action.value ??
                     ""
-            ].join("::");
+            ].join(
+                "::"
+            );
 
         case "select":
         case "checkbox":
@@ -599,39 +757,49 @@ function buildActionKey(action) {
                     "",
                 action.checked ??
                     ""
-            ].join("::");
+            ].join(
+                "::"
+            );
 
         default:
             return [
                 action.action,
                 action.selector ||
                     ""
-            ].join("::");
+            ].join(
+                "::"
+            );
     }
 }
 
 /**
- * Returns the XPath used only for consecutive click comparison.
+ * Returns the canonical XPath used for consecutive-click comparison.
  *
- * listeners.js supplies xpathKey using this order:
+ * The accepted selector is authoritative because it is the exact
+ * graph-generated selector persisted in the final action.
  *
- * 1. ID-based XPath when the element has an id.
- * 2. Otherwise the normal generated XPath.
- *
- * Fall back to clickId or the accepted selector when xpathKey is absent.
+ * xpathKey and clickId are compatibility fallbacks only.
  */
 function getClickXPathComparisonValue(
     job,
     built
 ) {
     const candidates = [
+        built?.selector,
+
         job?.xpathKey,
         job?.clickId,
+
         job?.capturedAction
             ?.xpathKey,
+
         job?.capturedAction
             ?.clickId,
-        built?.selector
+
+        job?.selector,
+
+        job?.capturedAction
+            ?.selector
     ];
 
     for (
@@ -707,10 +875,11 @@ function getClickXPathComparisonValue(
             );
 
     let finalized = false;
-    let lastAcceptedActionKey = null;
+    let lastAcceptedActionKey =
+        null;
 
     /*
-     * Store only the immediately previous accepted click XPath.
+     * Only the immediately previous accepted click XPath is retained.
      *
      * A -> A
      *
@@ -720,21 +889,31 @@ function getClickXPathComparisonValue(
      *
      * All three are accepted.
      */
-    let lastAcceptedClickXPath = "";
+    let lastAcceptedClickXPath =
+        "";
 
-    function pushAcceptedAction(action) {
+    function pushAcceptedAction(
+        action
+    ) {
         const cleanedAction =
-            omitNullFields(action);
+            omitNullFields(
+                action
+            );
 
-        if (!cleanedAction?.action) {
+        if (
+            !cleanedAction
+                ?.action
+        ) {
             return false;
         }
 
         if (
             SELECTOR_REQUIRED_ACTIONS.has(
-                cleanedAction.action
+                cleanedAction
+                    .action
             ) &&
-            !cleanedAction.selector
+            !cleanedAction
+                .selector
         ) {
             return false;
         }
@@ -763,21 +942,21 @@ function getClickXPathComparisonValue(
     }
 
     /**
-     * Commits a click using only the pre-click locator values supplied by
-     * listeners.js.
+     * Commits a click using only pre-click values supplied by listeners.js.
      *
-     * No XPath is recalculated from the post-click DOM here.
-     *
-     * Only an immediately repeated click XPath is suppressed. An XPath is
-     * allowed again after a different click XPath has been accepted.
+     * No XPath is recalculated here.
      */
-    function commitClickJob(job) {
+    function commitClickJob(
+        job
+    ) {
         const built =
             buildAcceptedClickAction(
                 job
             );
 
-        if (!built.accepted) {
+        if (
+            !built.accepted
+        ) {
             return {
                 ...built,
 
@@ -795,7 +974,8 @@ function getClickXPathComparisonValue(
 
         if (!clickXPath) {
             return {
-                accepted: false,
+                accepted:
+                    false,
 
                 sequence:
                     job?.sequence ??
@@ -811,8 +991,11 @@ function getClickXPathComparisonValue(
             clickXPath
         ) {
             return {
-                accepted: false,
-                duplicate: true,
+                accepted:
+                    false,
+
+                duplicate:
+                    true,
 
                 sequence:
                     job?.sequence ??
@@ -824,8 +1007,8 @@ function getClickXPathComparisonValue(
         }
 
         /*
-         * Do not let a preceding non-click action suppress this click through
-         * the general action-key deduplication path.
+         * Prevent a preceding non-click action from suppressing this click
+         * through the general action-key deduplication path.
          */
         lastAcceptedActionKey =
             null;
@@ -837,7 +1020,8 @@ function getClickXPathComparisonValue(
 
         if (!committed) {
             return {
-                accepted: false,
+                accepted:
+                    false,
 
                 sequence:
                     job?.sequence ??
@@ -848,14 +1032,12 @@ function getClickXPathComparisonValue(
             };
         }
 
-        /*
-         * Update only after the action was successfully committed.
-         */
         lastAcceptedClickXPath =
             clickXPath;
 
         return {
-            accepted: true,
+            accepted:
+                true,
 
             sequence:
                 job?.sequence ??
@@ -876,7 +1058,9 @@ function getClickXPathComparisonValue(
     }
 
     const finalize =
-        async () => {
+        async (
+            exitCode = 0
+        ) => {
             if (finalized) {
                 return;
             }
@@ -893,11 +1077,15 @@ function getClickXPathComparisonValue(
 
             const finalActions =
                 actions
-                    .filter(Boolean)
+                    .filter(
+                        Boolean
+                    )
                     .map(
                         omitNullFields
                     )
-                    .filter(Boolean);
+                    .filter(
+                        Boolean
+                    );
 
             fs.writeFileSync(
                 actionsPath,
@@ -921,124 +1109,151 @@ function getClickXPathComparisonValue(
 
             await context
                 .close()
-                .catch(() => {});
+                .catch(
+                    () => {}
+                );
 
             fs.rmSync(
                 userDataDir,
                 {
-                    recursive: true,
-                    force: true
+                    recursive:
+                        true,
+
+                    force:
+                        true
                 }
             );
 
-            process.exit(0);
+            process.exit(
+                exitCode
+            );
         };
 
     process.once(
         "SIGINT",
-        finalize
+        () => {
+            void finalize(
+                0
+            );
+        }
     );
 
     process.once(
         "SIGTERM",
-        finalize
+        () => {
+            void finalize(
+                0
+            );
+        }
     );
 
     try {
         /*
          * Existing non-click actions continue through this binding.
          */
-        await context.exposeBinding(
-            "__captureAction",
-            async (
-                _source,
-                data
-            ) => {
-                if (
-                    data?.action ===
-                    "click"
-                ) {
-                    return commitClickJob(
-                        data
-                    );
+        await context
+            .exposeBinding(
+                "__captureAction",
+                async (
+                    _source,
+                    data
+                ) => {
+                    if (
+                        data?.action ===
+                        "click"
+                    ) {
+                        return commitClickJob(
+                            data
+                        );
+                    }
+
+                    const committed =
+                        pushAcceptedAction(
+                            data
+                        );
+
+                    return {
+                        accepted:
+                            committed,
+
+                        reason:
+                            committed
+                                ? null
+                                : "Action was invalid or duplicated"
+                    };
                 }
-
-                const committed =
-                    pushAcceptedAction(
-                        data
-                    );
-
-                return {
-                    accepted:
-                        committed,
-
-                    reason:
-                        committed
-                            ? null
-                            : "Action was invalid or duplicated"
-                };
-            }
-        );
+            );
 
         /*
          * Direct click capture.
          *
-         * The locators supplied here were already generated and validated
-         * before the physical click in listeners.js.
-         *
-         * This binding must not recalculate them from the post-click DOM.
+         * selector, primary_xpath and backup_xpath were already generated
+         * and validated before the click.
          */
-        await context.exposeBinding(
-            "__captureClickAction",
-            async (
-                _source,
-                job
-            ) => {
-                return commitClickJob(
+        await context
+            .exposeBinding(
+                "__captureClickAction",
+                async (
+                    _source,
                     job
-                );
-            }
-        );
+                ) => {
+                    return commitClickJob(
+                        job
+                    );
+                }
+            );
 
-        await context.addInitScript(
-            injectListeners
-        );
+        /*
+         * Use explicit content rather than passing a possibly undefined
+         * imported value.
+         *
+         * The actual attribute-agnostic graph algorithm remains inside
+         * listeners.js.
+         */
+        await context
+            .addInitScript({
+                content:
+                    LISTENER_INIT_SCRIPT
+            });
 
-        await context._enableRecorder({
-            browserName:
-                browserLabel,
+        await context
+            ._enableRecorder({
+                browserName:
+                    browserLabel,
 
-            language:
-                "playwright-test",
+                language:
+                    "playwright-test",
 
-            mode:
-                "recording",
+                mode:
+                    "recording",
 
-            outputFile:
-                scriptPath,
+                outputFile:
+                    scriptPath,
 
-            handleSIGINT:
-                false
-        });
+                handleSIGINT:
+                    false
+            });
 
         let page =
             context
                 .pages()
                 .find(
-                    (candidatePage) =>
+                    candidatePage =>
                         !candidatePage
                             .isClosed()
                 );
 
         if (!page) {
             page =
-                await context.newPage();
+                await context
+                    .newPage();
         }
 
         if (viewport) {
-            await page.setViewportSize(
-                viewport
-            );
+            await page
+                .setViewportSize(
+                    viewport
+                );
         }
 
         console.log(
@@ -1086,11 +1301,19 @@ function getClickXPathComparisonValue(
 
         context.on(
             "close",
-            finalize
+            () => {
+                void finalize(
+                    0
+                );
+            }
         );
     } catch (error) {
-        console.error(error);
+        console.error(
+            error
+        );
 
-        await finalize();
+        await finalize(
+            1
+        );
     }
 })();

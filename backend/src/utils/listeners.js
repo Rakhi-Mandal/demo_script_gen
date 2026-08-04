@@ -1,71 +1,63 @@
 function injectListeners() {
-  const SELECTOR_ATTRS = [
-    "data-testid",
-    "data-test",
-    "data-cy",
-    "data-label",
-    "id",
-    "name",
-    "aria-label",
-    "x-tooltip",
-    "wire:click",
-    "placeholder",
-  ];
-
-  const XPATH_CANDIDATE_ATTRS = [
-    ...SELECTOR_ATTRS,
-    "title",
-    "type",
-  ];
-
-  const WEAK_NAME_VALUES = new Set([
-    "q",
-    "query",
-    "search",
-    "input",
-    "text",
-  ]);
-
-  const WEAK_ID_VALUES = new Set([
-    "app",
-    "container",
-    "content",
-    "main",
-    "page",
-    "root",
-    "wrapper",
-  ]);
-
-  const ANCHOR_TAGS = new Set([
-    "A",
-    "BUTTON",
-    "INPUT",
-    "TEXTAREA",
-    "SELECT",
-    "FORM",
-    "HEADER",
-    "NAV",
-    "MAIN",
-  ]);
-
-  const TEXT_XPATH_TAGS = new Set([
-    "A",
-    "BUTTON",
-    "LABEL",
-    "OPTION",
-    "H1",
-    "H2",
-    "H3",
-    "H4",
-    "H5",
-    "H6",
-  ]);
-
-  /*
-   * Prevent every recorder listener from being installed more than once.
-   */
   const RECORDER_INSTALL_ATTRIBUTE =
     "data-pw-recorder-listeners-installed";
+
+  const POINTER_CLICK_MAX_AGE_MS = 1500;
+
+  /*
+   * Attribute-value quarantine.
+   *
+   * Any attribute whose value contains one of these fragments is excluded,
+   * regardless of its attribute name.
+   *
+   * Examples rejected:
+   *
+   * id="pv_id_3691"
+   * aria-controls="pv_id_4612_panel"
+   * class="widget pv_id_100"
+   * data-owner="prefix-pv_id_suffix"
+   *
+   * Matching is case-insensitive.
+   */
+  const GRAPH_ATTRIBUTE_VALUE_QUARANTINE =
+    Object.freeze([
+      "pv_id",
+    ]);
+
+  /*
+   * Weighted local DOM graph limits.
+   */
+  const GRAPH_XPATH_MAX_COST = 10;
+  const GRAPH_XPATH_MAX_VISITED = 180;
+  const GRAPH_XPATH_MAX_CHILDREN_PER_NODE = 24;
+  const GRAPH_XPATH_MAX_ANCHORS = 60;
+  const GRAPH_XPATH_MAX_GENERATED = 800;
+  const GRAPH_XPATH_MAX_LENGTH = 360;
+
+  const GRAPH_EDGE_COST = {
+    PARENT: 1,
+    PREVIOUS_SIBLING: 2,
+    NEXT_SIBLING: 2,
+    CHILD: 3,
+  };
+
+  /*
+   * Traversal priority once an ancestor/parent is encountered:
+   *
+   * 1. Traverse the parent's children and their bounded subtrees.
+   * 2. Consider the parent itself as an XPath anchor.
+   * 3. Traverse the parent's previous and next sibling peers.
+   * 4. Ascend to the next parent level.
+   *
+   * These are hierarchical priority components. A child subtree retains the
+   * CHILD prefix, so it is completed before the parent SELF phase.
+   */
+  const GRAPH_TRAVERSAL_PRIORITY = {
+    CHILDREN: 0,
+    SELF: 1,
+    SIBLING_PEERS: 2,
+    ASCEND_TO_PARENT: 3,
+  };
 
   const recorderAlreadyInstalled =
     window.__PW_RECORDER_LISTENERS_INSTALLED__ ||
@@ -90,33 +82,17 @@ function injectListeners() {
   );
 
   /*
-   * Store only the immediately previous click XPath.
-   *
-   * A -> A
-   *
-   * The second A is rejected.
-   *
-   * A -> B -> A
-   *
-   * All three are accepted because only consecutive duplicate XPaths are
-   * rejected.
+   * Consecutive-click state.
    */
   function getClickXPathStateOwner() {
     try {
       const topWindow =
         window.top;
 
-      /*
-       * Access verifies that the top frame is same-origin.
-       */
       void topWindow.location.href;
 
       return topWindow;
     } catch {
-      /*
-       * A cross-origin frame cannot directly share variables with the top
-       * frame. Keep its consecutive-click state inside that frame.
-       */
       return window;
     }
   }
@@ -150,9 +126,6 @@ function injectListeners() {
       return false;
     }
 
-    /*
-     * Reject only an immediately repeated click XPath.
-     */
     if (
       getLastRecordedClickXPath() ===
       xpathKey
@@ -160,9 +133,6 @@ function injectListeners() {
       return false;
     }
 
-    /*
-     * Replace the previous value immediately.
-     */
     clickXPathStateOwner
       .__PW_LAST_RECORDED_CLICK_XPATH__ =
       xpathKey;
@@ -173,11 +143,6 @@ function injectListeners() {
   function markClickXPathSaved(
     xpathKey
   ) {
-    /*
-     * No Map entry or status update is required.
-     *
-     * The XPath already remains stored as the immediately previous click.
-     */
     if (
       !xpathKey ||
       getLastRecordedClickXPath() !==
@@ -194,12 +159,6 @@ function injectListeners() {
       return;
     }
 
-    /*
-     * Clear only when this failed operation still owns the current value.
-     *
-     * This prevents an older asynchronous failure from clearing a newer
-     * click XPath.
-     */
     if (
       getLastRecordedClickXPath() ===
       xpathKey
@@ -210,11 +169,17 @@ function injectListeners() {
     }
   }
 
-  function omitNullFields(value) {
+  function omitNullFields(
+    value
+  ) {
     if (Array.isArray(value)) {
-      const cleanedItems = value
-        .map(omitNullFields)
-        .filter(item => item !== null);
+      const cleanedItems =
+        value
+          .map(omitNullFields)
+          .filter(
+            item =>
+              item !== null
+          );
 
       return cleanedItems.length
         ? cleanedItems
@@ -242,12 +207,8 @@ function injectListeners() {
             ([
               ,
               entryValue,
-            ]) => {
-              return (
-                entryValue !==
-                null
-              );
-            }
+            ]) =>
+              entryValue !== null
           );
 
       return cleanedEntries.length
@@ -257,7 +218,9 @@ function injectListeners() {
         : null;
     }
 
-    return value;
+    return value === undefined
+      ? null
+      : value;
   }
 
   function isRealUserFrame() {
@@ -266,1262 +229,282 @@ function injectListeners() {
         location.href.toLowerCase();
 
       return !(
-        url.includes(
-          "googleads"
-        ) ||
-        url.includes(
-          "doubleclick"
-        ) ||
-        url.includes(
-          "recaptcha"
-        ) ||
-        url.includes(
-          "openx.net"
-        ) ||
-        url.includes(
-          "google-bidout"
-        ) ||
-        url.includes(
-          "googlesyndication"
-        ) ||
-        url.includes(
-          "googleadservices"
-        ) ||
-        url.includes(
-          "googletagservices"
-        ) ||
-        url.includes(
-          "adservice.google"
-        ) ||
-        url.includes(
-          "adnxs"
-        ) ||
-        url.includes(
-          "rubiconproject"
-        ) ||
-        url.includes(
-          "pubmatic"
-        ) ||
-        url.includes(
-          "criteo"
-        ) ||
-        url.includes(
-          "taboola"
-        ) ||
-        url.includes(
-          "outbrain"
-        )
+        url.includes("googleads") ||
+        url.includes("doubleclick") ||
+        url.includes("recaptcha") ||
+        url.includes("openx.net") ||
+        url.includes("google-bidout") ||
+        url.includes("googlesyndication") ||
+        url.includes("googleadservices") ||
+        url.includes("googletagservices") ||
+        url.includes("adservice.google") ||
+        url.includes("adnxs") ||
+        url.includes("rubiconproject") ||
+        url.includes("pubmatic") ||
+        url.includes("criteo") ||
+        url.includes("taboola") ||
+        url.includes("outbrain")
       );
     } catch {
       return false;
     }
   }
 
-  function getIframeSelector(el) {
-    if (!el) {
-      return "iframe";
-    }
-
-    if (el.id) {
-      return `#${el.id}`;
-    }
-
-    if (el.name) {
-      return (
-        `[name="${el.name}"]`
-      );
-    }
-
-    const title =
-      el.getAttribute(
-        "title"
-      );
-
-    if (title) {
-      return (
-        `iframe[title="${title}"]`
-      );
-    }
-
-    const src =
-      el.getAttribute(
-        "src"
-      );
-
-    if (src) {
-      try {
-        return (
-          `iframe[src*="` +
-          `${
-            new URL(
-              src,
-              location.href
-            ).pathname
-          }"]`
-        );
-      } catch {
-        return (
-          `iframe[src="${src}"]`
-        );
-      }
-    }
-
-    let nth = 1;
-    let sibling = el;
-
-    while (
-      (
-        sibling =
-          sibling
-            .previousElementSibling
-      )
-    ) {
-      if (
-        sibling.tagName ===
-        "IFRAME"
-      ) {
-        nth += 1;
-      }
-    }
-
+  function getAttributeValue(
+    element,
+    attributeName
+  ) {
     return (
-      `iframe:nth-of-type(${nth})`
+      element?.getAttribute?.(
+        attributeName
+      ) ||
+      ""
     );
   }
 
-  function getElementText(el) {
+  function isGraphAttributeValueQuarantined(
+    value
+  ) {
+    const normalizedValue =
+      String(value || "")
+        .trim()
+        .toLowerCase();
+
+    if (!normalizedValue) {
+      return false;
+    }
+
+    return GRAPH_ATTRIBUTE_VALUE_QUARANTINE
+      .some(fragment => {
+        const normalizedFragment =
+          String(fragment || "")
+            .trim()
+            .toLowerCase();
+
+        return (
+          !!normalizedFragment &&
+          normalizedValue.includes(
+            normalizedFragment
+          )
+        );
+      });
+  }
+
+  function getNonQuarantinedAttributeValue(
+    element,
+    attributeName
+  ) {
+    const value =
+      getAttributeValue(
+        element,
+        attributeName
+      );
+
+    return isGraphAttributeValueQuarantined(
+      value
+    )
+      ? ""
+      : value;
+  }
+
+  function getNonQuarantinedAttributes(
+    element
+  ) {
+    return Array.from(
+      element?.attributes ||
+      []
+    ).filter(attribute => {
+      return !isGraphAttributeValueQuarantined(
+        attribute.value
+      );
+    });
+  }
+
+  function getElementText(
+    element
+  ) {
     return (
-      el?.innerText
-        ?.replace(
-          /\s+/g,
-          " "
-        )
+      element?.innerText
+        ?.replace(/\s+/g, " ")
         .trim() ||
       ""
     );
   }
 
-  function getShortText(el) {
-    const text =
-      getElementText(el);
-
-    return (
-      text &&
-      text.length < 50
-        ? text
-        : ""
-    );
-  }
-
-  function getLongTextSnippet(
-    el
+  function getGraphNormalizedText(
+    element
   ) {
-    const text =
-      getElementText(el);
-
-    if (
-      !text ||
-      text.length < 50
-    ) {
-      return "";
-    }
-
-    const snippet =
-      text.slice(
-        0,
-        40
-      );
-
-    const lastSpace =
-      snippet.lastIndexOf(
-        " "
-      );
-
-    return (
-      lastSpace >= 12
-        ? snippet.slice(
-            0,
-            lastSpace
-          )
-        : snippet
-    ).trim();
-  }
-
-  function getChoiceInputNeighborText(
-    el
-  ) {
-    if (
-      !(
-        el instanceof
-        HTMLInputElement
-      )
-    ) {
-      return "";
-    }
-
-    const type =
-      getAttributeValue(
-        el,
-        "type"
-      ).toLowerCase();
-
-    if (
-      type !== "radio" &&
-      type !== "checkbox"
-    ) {
-      return "";
-    }
-
-    const labelText =
-      getElementText(
-        el.closest(
-          "label"
-        )
-      );
-
-    if (labelText) {
-      return labelText.slice(
-        0,
-        120
-      );
-    }
-
-    const labelledBy =
-      getAttributeValue(
-        el,
-        "aria-labelledby"
-      );
-
-    if (labelledBy) {
-      const text =
-        labelledBy
-          .split(/\s+/)
-          .map(id => {
-            return getElementText(
-              document
-                .getElementById(
-                  id
-                )
-            );
-          })
-          .filter(Boolean)
-          .join(" ");
-
-      if (text) {
-        return text.slice(
-          0,
-          120
-        );
-      }
-    }
-
-    const blockText =
-      getElementText(
-        el.closest(
-          'tr, [role="row"], li, [role="option"], ' +
-          '[data-row], [data-cy*="row" i], ' +
-          '[data-testid*="row" i]'
-        )
-      );
-
-    if (blockText) {
-      return blockText.slice(
-        0,
-        120
-      );
-    }
-
-    let current =
-      el.parentElement;
-
-    for (
-      let depth = 0;
-      current &&
-      depth < 4;
-      depth += 1,
-      current =
-        current.parentElement
-    ) {
-      const text =
-        getElementText(
-          current
-        );
-
-      if (
-        text &&
-        text.length <= 120
-      ) {
-        return text;
-      }
-    }
-
-    return "";
-  }
-
-  function getSelectorFriendlyTestId(
-    el
-  ) {
-    const testId =
-      el?.getAttribute?.(
-        "data-testid"
-      );
-
-    if (testId) {
-      return {
-        attribute:
-          "data-testid",
-
-        value:
-          testId,
-      };
-    }
-
-    const dataTest =
-      el?.getAttribute?.(
-        "data-test"
-      );
-
-    if (dataTest) {
-      return {
-        attribute:
-          "data-test",
-
-        value:
-          dataTest,
-      };
-    }
-
-    const dataCy =
-      el?.getAttribute?.(
-        "data-cy"
-      );
-
-    if (dataCy) {
-      return {
-        attribute:
-          "data-cy",
-
-        value:
-          dataCy,
-      };
-    }
-
-    const dataLabel =
-      el?.getAttribute?.(
-        "data-label"
-      );
-
-    return dataLabel
-      ? {
-          attribute:
-            "data-label",
-
-          value:
-            dataLabel,
-        }
-      : null;
-  }
-
-  function getSelectorFriendlyTooltip(
-    el
-  ) {
-    const tooltip =
-      el?.getAttribute?.(
-        "x-tooltip"
-      );
-
-    return tooltip
-      ? {
-          attribute:
-            "x-tooltip",
-
-          value:
-            tooltip,
-        }
-      : null;
-  }
-
-  function getSelectorFriendlyWireClick(
-    el
-  ) {
-    const wireClick =
-      el?.getAttribute?.(
-        "wire:click"
-      );
-
-    return wireClick
-      ? {
-          attribute:
-            "wire:click",
-
-          value:
-            wireClick,
-        }
-      : null;
-  }
-
-  function getTestIdXPathOptions(
-    el
-  ) {
-    return [
-      [
-        "data-testid",
-        getAttributeValue(
-          el,
-          "data-testid"
-        ),
-      ],
-      [
-        "data-test",
-        getAttributeValue(
-          el,
-          "data-test"
-        ),
-      ],
-      [
-        "data-cy",
-        getAttributeValue(
-          el,
-          "data-cy"
-        ),
-      ],
-      [
-        "data-label",
-        getAttributeValue(
-          el,
-          "data-label"
-        ),
-      ],
-      [
-        "x-tooltip",
-        getAttributeValue(
-          el,
-          "x-tooltip"
-        ),
-      ],
-      [
-        "wire:click",
-        getAttributeValue(
-          el,
-          "wire:click"
-        ),
-      ],
-    ].filter(
-      ([
-        ,
-        value,
-      ]) => value
-    );
-  }
-
-  function getAttributeValue(
-    el,
-    attribute
-  ) {
-    return (
-      el?.getAttribute?.(
-        attribute
-      ) ||
+    return String(
+      element?.textContent ||
       ""
-    );
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
-  function hasStrongNameSelector(
-    el
-  ) {
-    const name =
-      getAttributeValue(
-        el,
-        "name"
-      ).trim();
-
-    return (
-      !!name &&
-      name.length > 2 &&
-      !WEAK_NAME_VALUES.has(
-        name.toLowerCase()
-      )
-    );
-  }
-
-  function isLikelyDynamicValue(
+  function xpathLiteral(
     value
   ) {
-    if (!value) {
-      return true;
+    value =
+      String(value);
+
+    if (!value.includes("'")) {
+      return `'${value}'`;
     }
 
-    const trimmed =
-      value.trim();
-
-    return (
-      !trimmed ||
-      trimmed.length > 80 ||
-      /[?&=#]/.test(
-        trimmed
-      ) ||
-      /[0-9]{5,}/.test(
-        trimmed
-      ) ||
-      /^[a-f0-9_-]{12,}$/i.test(
-        trimmed
-      )
-    );
-  }
-
-  function isMeaningfulAttributeValue(
-    attribute,
-    value
-  ) {
-    const trimmed =
-      String(
-        value ||
-        ""
-      ).trim();
-
-    if (!trimmed) {
-      return false;
-    }
-
-    if (
-      attribute ===
-      "name"
-    ) {
-      return (
-        trimmed.length > 2 &&
-        !WEAK_NAME_VALUES.has(
-          trimmed.toLowerCase()
-        )
-      );
-    }
-
-    if (
-      attribute ===
-      "id"
-    ) {
-      return (
-        !WEAK_ID_VALUES.has(
-          trimmed.toLowerCase()
-        ) &&
-        !isLikelyDynamicValue(
-          trimmed
-        )
-      );
-    }
-
-    if (
-      attribute ===
-      "type"
-    ) {
-      return [
-        "button",
-        "submit",
-        "checkbox",
-        "radio",
-        "email",
-        "password",
-      ].includes(
-        trimmed.toLowerCase()
-      );
+    if (!value.includes('"')) {
+      return `"${value}"`;
     }
 
     return (
-      !isLikelyDynamicValue(
-        trimmed
-      )
+      "concat(" +
+      value
+        .split("'")
+        .map(part => {
+          return `'${part}'`;
+        })
+        .join(', "\'", ') +
+      ")"
     );
   }
 
-  function canUseTextForXPath(
-    el
+  function getXPathTag(
+    element
   ) {
-    if (
-      !(
-        el instanceof
-        Element
-      )
-    ) {
-      return false;
-    }
+    const tag =
+      element.localName ||
+      element.tagName
+        .toLowerCase();
 
     if (
-      TEXT_XPATH_TAGS.has(
-        el.tagName
-      )
+      element.namespaceURI ===
+      "http://www.w3.org/2000/svg"
     ) {
-      return true;
-    }
-
-    const role =
-      getAttributeValue(
-        el,
-        "role"
+      return (
+        `*[local-name()=` +
+        `${xpathLiteral(tag)}]`
       );
+    }
 
-    return [
-      "button",
-      "link",
-      "menuitem",
-      "tab",
-      "option",
-    ].includes(role);
+    return tag;
   }
 
-  function isAcceptableXPath(
-    xpath
+  function matchesOnlyElement(
+    xpath,
+    targetElement
   ) {
-    if (
-      !xpath ||
-      xpath.length > 160
-    ) {
+    try {
+      const doc =
+        targetElement?.ownerDocument ||
+        document;
+
+      const result =
+        doc.evaluate(
+          xpath,
+          doc,
+          null,
+          XPathResult
+            .ORDERED_NODE_SNAPSHOT_TYPE,
+          null
+        );
+
+      return (
+        result.snapshotLength === 1 &&
+        result.snapshotItem(0) ===
+          targetElement
+      );
+    } catch {
       return false;
     }
+  }
 
+  function matchesOnlyElementInScope(
+    scopeElement,
+    relativeXPath,
+    targetElement
+  ) {
+    try {
+      const doc =
+        targetElement?.ownerDocument ||
+        document;
+
+      const result =
+        doc.evaluate(
+          relativeXPath,
+          scopeElement,
+          null,
+          XPathResult
+            .ORDERED_NODE_SNAPSHOT_TYPE,
+          null
+        );
+
+      return (
+        result.snapshotLength === 1 &&
+        result.snapshotItem(0) ===
+          targetElement
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function isSvgElement(
+    element
+  ) {
     return (
-      xpath
-        .split("/")
-        .filter(Boolean)
-        .length <= 5
-    );
-  }
-
-  function joinXPath(
-    anchor,
-    scopedOrRelative
-  ) {
-    if (
-      !anchor ||
-      !scopedOrRelative
-    ) {
-      return "";
-    }
-
-    const joined =
-      anchor +
-      scopedOrRelative.slice(
-        1
-      );
-
-    return isAcceptableXPath(
-      joined
-    )
-      ? joined
-      : "";
-  }
-
-  function getSelector(el) {
-    if (!el) {
-      return "";
-    }
-
-    el =
-      getXPathFriendlyTarget(
-        el
-      );
-
-    if (!el) {
-      return "";
-    }
-
-    const tagName =
-      el.tagName
-        ?.toLowerCase?.() ||
-      "";
-
-    const preferredAncestor =
-      el instanceof Element
-        ? el.closest(
-            'a, button, [role="button"], label, summary'
-          )
-        : null;
-
-    if (
-      preferredAncestor &&
-      preferredAncestor !== el
-    ) {
-      const preferredXPath =
-        getUniqueXPathAnchor(
-          preferredAncestor
-        );
-
-      if (preferredXPath) {
-        return (
-          `xpath=${preferredXPath}`
-        );
-      }
-
-      el =
-        preferredAncestor;
-    }
-
-    if (
-      [
-        "HTML",
-        "BODY",
-      ].includes(
-        el.tagName
+      !!element &&
+      typeof element.tagName ===
+        "string" &&
+      (
+        element.tagName
+          .toLowerCase() ===
+          "svg" ||
+        element.namespaceURI ===
+          "http://www.w3.org/2000/svg"
       )
-    ) {
-      return "";
-    }
-
-    const listItemDataLabel =
-      el.tagName === "LI"
-        ? getAttributeValue(
-            el,
-            "data-label"
-          )
-        : "";
-
-    if (listItemDataLabel) {
-      return (
-        `li[data-label="` +
-        `${listItemDataLabel}"]`
-      );
-    }
-
-    let choiceSelector = "";
-
-    if (
-      el instanceof
-      HTMLInputElement
-    ) {
-      const type =
-        getAttributeValue(
-          el,
-          "type"
-        ).toLowerCase();
-
-      if (
-        type === "radio" ||
-        type === "checkbox"
-      ) {
-        const name =
-          getAttributeValue(
-            el,
-            "name"
-          );
-
-        const value =
-          getAttributeValue(
-            el,
-            "value"
-          );
-
-        if (
-          name &&
-          value &&
-          value !== "on"
-        ) {
-          choiceSelector =
-            `input[name="${name}"]` +
-            `[value="${value}"]`;
-        } else if (
-          name &&
-          type
-        ) {
-          choiceSelector =
-            `input[name="${name}"]` +
-            `[type="${type}"]`;
-        }
-      }
-    }
-
-    if (choiceSelector) {
-      return choiceSelector;
-    }
-
-    if (el.id) {
-      return `#${el.id}`;
-    }
-
-    const testId =
-      getSelectorFriendlyTestId(
-        el
-      );
-
-    if (testId) {
-      return (
-        `[${testId.attribute}=` +
-        `"${testId.value}"]`
-      );
-    }
-
-    const tooltip =
-      getSelectorFriendlyTooltip(
-        el
-      );
-
-    const wireClick =
-      getSelectorFriendlyWireClick(
-        el
-      );
-
-    const attrPrefix =
-      tagName ||
-      "";
-
-    if (
-      tooltip &&
-      wireClick
-    ) {
-      return (
-        `${attrPrefix}` +
-        `[${tooltip.attribute}="${tooltip.value}"]` +
-        `[wire\\:click="${wireClick.value}"]`
-      );
-    }
-
-    if (wireClick) {
-      return (
-        `${attrPrefix}` +
-        `[${wireClick.attribute}="${wireClick.value}"]`
-      );
-    }
-
-    const aria =
-      getAttributeValue(
-        el,
-        "aria-label"
-      );
-
-    if (aria) {
-      return (
-        `[aria-label="${aria}"]`
-      );
-    }
-
-    if (tooltip) {
-      return (
-        `${attrPrefix}` +
-        `[${tooltip.attribute}="${tooltip.value}"]`
-      );
-    }
-
-    const placeholder =
-      getAttributeValue(
-        el,
-        "placeholder"
-      );
-
-    if (placeholder) {
-      return (
-        `[placeholder="${placeholder}"]`
-      );
-    }
-
-    const title =
-      getAttributeValue(
-        el,
-        "title"
-      );
-
-    if (title) {
-      return (
-        `[title="${title}"]`
-      );
-    }
-
-    const role =
-      getAttributeValue(
-        el,
-        "role"
-      );
-
-    const text =
-      getShortText(el);
-
-    if (
-      role &&
-      text
-    ) {
-      return (
-        `role=${role}` +
-        `[name="${text}"]`
-      );
-    }
-
-    if (
-      hasStrongNameSelector(
-        el
-      )
-    ) {
-      const type =
-        getAttributeValue(
-          el,
-          "type"
-        );
-
-      return type
-        ? (
-            `${
-              el.tagName
-                .toLowerCase()
-            }` +
-            `[name="${el.name}"]` +
-            `[type="${type}"]`
-          )
-        : (
-            `[name="${el.name}"]`
-          );
-    }
-
-    if (text) {
-      return `text=${text}`;
-    }
-
-    const xpath =
-      getRelativeXPath(el);
-
-    return xpath
-      ? `xpath=${xpath}`
-      : getCssPath(el);
-  }
-
-  function getRelativeXPath(
-    el
-  ) {
-    if (
-      !(
-        el instanceof
-        Element
-      )
-    ) {
-      return "";
-    }
-
-    const directAnchor =
-      getUniqueXPathAnchor(
-        el
-      );
-
-    if (directAnchor) {
-      return directAnchor;
-    }
-
-    const stableAncestor =
-      getStableAnchorAncestor(
-        el
-      );
-
-    if (
-      stableAncestor &&
-      stableAncestor !== el
-    ) {
-      const stableAnchorXPath =
-        getUniqueXPathAnchor(
-          stableAncestor
-        );
-
-      if (stableAnchorXPath) {
-        const scopedTarget =
-          getUniqueScopedXPath(
-            stableAncestor,
-            el
-          );
-
-        if (scopedTarget) {
-          return joinXPath(
-            stableAnchorXPath,
-            scopedTarget
-          );
-        }
-
-        const anchoredPath =
-          stableAnchorXPath +
-          buildPathFromAncestor(
-            stableAncestor,
-            el
-          );
-
-        if (
-          isAcceptableXPath(
-            anchoredPath
-          )
-        ) {
-          return anchoredPath;
-        }
-      }
-    }
-
-    let current = el;
-
-    while (
-      current &&
-      current.nodeType ===
-        Node.ELEMENT_NODE
-    ) {
-      const anchor =
-        getUniqueXPathAnchor(
-          current
-        );
-
-      if (anchor) {
-        const scopedTarget =
-          getUniqueScopedXPath(
-            current,
-            el
-          );
-
-        if (scopedTarget) {
-          return joinXPath(
-            anchor,
-            scopedTarget
-          );
-        }
-
-        let descendant = el;
-
-        while (
-          descendant &&
-          descendant !==
-            current
-        ) {
-          const scopedDescendant =
-            getUniqueScopedXPath(
-              current,
-              descendant
-            );
-
-          if (scopedDescendant) {
-            const joined =
-              anchor +
-              scopedDescendant.slice(
-                1
-              ) +
-              buildPathFromAncestor(
-                descendant,
-                el
-              );
-
-            if (
-              isAcceptableXPath(
-                joined
-              )
-            ) {
-              return joined;
-            }
-          }
-
-          descendant =
-            descendant
-              .parentElement;
-        }
-
-        const anchoredPath =
-          anchor +
-          buildPathFromAncestor(
-            current,
-            el
-          );
-
-        if (
-          isAcceptableXPath(
-            anchoredPath
-          )
-        ) {
-          return anchoredPath;
-        }
-      }
-
-      current =
-        current.parentElement;
-
-      if (
-        !current ||
-        [
-          "HTML",
-          "BODY",
-        ].includes(
-          current.tagName
-        )
-      ) {
-        break;
-      }
-    }
-
-    current = el;
-
-    while (
-      current &&
-      current.nodeType ===
-        Node.ELEMENT_NODE
-    ) {
-      const candidate =
-        getUniqueXPathAnchor(
-          current
-        );
-
-      if (candidate) {
-        const anchoredPath =
-          candidate +
-          buildPathFromAncestor(
-            current,
-            el
-          );
-
-        if (
-          isAcceptableXPath(
-            anchoredPath
-          )
-        ) {
-          return anchoredPath;
-        }
-      }
-
-      current =
-        current.parentElement;
-    }
-
-    const steps = [];
-
-    current = el;
-
-    while (
-      current &&
-      current.nodeType ===
-        Node.ELEMENT_NODE &&
-      steps.length < 3
-    ) {
-      steps.unshift(
-        buildXPathStep(
-          current
-        )
-      );
-
-      current =
-        current.parentElement;
-
-      if (
-        !current ||
-        [
-          "HTML",
-          "BODY",
-        ].includes(
-          current.tagName
-        )
-      ) {
-        break;
-      }
-    }
-
-    const fallbackPath =
-      `//${steps.join("/")}`;
-
-    return isAcceptableXPath(
-      fallbackPath
-    )
-      ? fallbackPath
-      : "";
-  }
-
-  function getCssPath(el) {
-    if (
-      !(
-        el instanceof
-        Element
-      )
-    ) {
-      return "";
-    }
-
-    const cssPath = [];
-
-    while (
-      el &&
-      el.nodeType ===
-        Node.ELEMENT_NODE
-    ) {
-      let selector =
-        el.nodeName
-          .toLowerCase();
-
-      if (el.id) {
-        selector +=
-          `#${el.id}`;
-
-        cssPath.unshift(
-          selector
-        );
-
-        break;
-      }
-
-      selector +=
-        `:nth-of-type(` +
-        `${getSiblingIndex(
-          el
-        )})`;
-
-      cssPath.unshift(
-        selector
-      );
-
-      el =
-        el.parentElement;
-    }
-
-    return cssPath.join(
-      " > "
     );
   }
 
   function getXPathFriendlyTarget(
-    el
+    element
   ) {
     if (
       !(
-        el instanceof
+        element instanceof
         Element
       )
     ) {
       return null;
     }
 
-    if (isSvgElement(el)) {
-      let current = el;
+    if (!isSvgElement(element)) {
+      return element;
+    }
 
-      while (
-        current &&
-        current.parentElement
-      ) {
-        current =
-          current.parentElement;
+    let current =
+      element;
 
-        if (
-          !isSvgElement(
-            current
-          )
-        ) {
-          return current;
-        }
+    while (
+      current &&
+      current.parentElement
+    ) {
+      current =
+        current.parentElement;
+
+      if (!isSvgElement(current)) {
+        return current;
       }
     }
 
-    return el;
-  }
-
-  function isSvgElement(el) {
-    return (
-      !!el &&
-      typeof el.tagName ===
-        "string" &&
-      (
-        el.tagName
-          .toLowerCase() ===
-          "svg" ||
-        el.namespaceURI ===
-          "http://www.w3.org/2000/svg"
-      )
-    );
+    return element;
   }
 
   function getActionableTarget(
-    el
+    element
   ) {
     if (
       !(
-        el instanceof
+        element instanceof
         Element
       )
     ) {
@@ -1529,25 +512,22 @@ function injectListeners() {
     }
 
     const labelAncestor =
-      el.closest(
-        "label"
-      );
+      element.closest("label");
 
-    let labelControl = null;
+    let labelControl =
+      null;
 
     if (
-      labelAncestor
-        instanceof
-        HTMLLabelElement
+      labelAncestor instanceof
+      HTMLLabelElement
     ) {
       labelControl =
-        labelAncestor.control
-          instanceof Element
+        labelAncestor.control instanceof
+        Element
           ? labelAncestor.control
-          : labelAncestor
-              .querySelector(
-                "input, textarea, select, button"
-              );
+          : labelAncestor.querySelector(
+              "input, textarea, select, button"
+            );
     }
 
     if (labelControl) {
@@ -1577,349 +557,2194 @@ function injectListeners() {
       }
     }
 
-    return el.closest(
+    return element.closest(
       "a, button, input, textarea, select, option, summary, " +
-      'li[data-label], li[role="option"], [role="option"], ' +
-      '[role="menuitem"], [role="listitem"], [role="button"], ' +
-      '[role="link"], [role="checkbox"], [role="radio"], ' +
-      '[role="tab"], [role="switch"]'
+      '[role="option"], [role="menuitem"], [role="listitem"], ' +
+      '[role="button"], [role="link"], [role="checkbox"], ' +
+      '[role="radio"], [role="tab"], [role="switch"]'
     );
   }
 
-  function isUsefulContainer(
-    el
-  ) {
-    return (
-      el instanceof Element &&
-      (
-        ANCHOR_TAGS.has(
-          el.tagName
-        ) ||
-        isMeaningfulAttributeValue(
-          "id",
-          el.id
-        ) ||
-        !!getSelectorFriendlyTestId(
-          el
-        ) ||
-        !!getSelectorFriendlyTooltip(
-          el
-        ) ||
-        !!getSelectorFriendlyWireClick(
-          el
-        ) ||
-        isMeaningfulAttributeValue(
-          "aria-label",
-          getAttributeValue(
-            el,
-            "aria-label"
-          )
-        ) ||
-        isMeaningfulAttributeValue(
-          "title",
-          getAttributeValue(
-            el,
-            "title"
-          )
-        ) ||
-        hasStrongNameSelector(
-          el
-        )
-      )
-    );
-  }
-
-  function getStableAnchorAncestor(
-    el
-  ) {
-    let current = el;
-
-    while (
-      current &&
-      current.nodeType ===
-        Node.ELEMENT_NODE
-    ) {
-      if (
-        isUsefulContainer(
-          current
-        )
-      ) {
-        return current;
-      }
-
-      current =
-        current.parentElement;
-
-      if (
-        !current ||
-        [
-          "HTML",
-          "BODY",
-        ].includes(
-          current.tagName
-        )
-      ) {
-        break;
-      }
-    }
-
-    return null;
-  }
-
-  function escapeXPathLiteral(
-    value
+  function getChoiceInputNeighborText(
+    element
   ) {
     if (
-      !value.includes('"')
-    ) {
-      return `"${value}"`;
-    }
-
-    if (
-      !value.includes("'")
-    ) {
-      return `'${value}'`;
-    }
-
-    return (
-      "concat(" +
-      value
-        .split('"')
-        .map(part => {
-          return `"${part}"`;
-        })
-        .join(
-          ", '\"', "
-        ) +
-      ")"
-    );
-  }
-
-  function getSiblingIndex(
-    el
-  ) {
-    let nth = 1;
-    let sibling = el;
-
-    while (
-      (
-        sibling =
-          sibling
-            .previousElementSibling
+      !(
+        element instanceof
+        HTMLInputElement
       )
     ) {
-      if (
-        sibling.tagName ===
-        el.tagName
-      ) {
-        nth += 1;
-      }
+      return "";
     }
 
-    return nth;
-  }
+    const type =
+      getAttributeValue(
+        element,
+        "type"
+      ).toLowerCase();
 
-  function isUniqueXPath(
-    xpath,
-    el
-  ) {
-    try {
-      const result =
-        document.evaluate(
-          xpath,
-          document,
-          null,
-          XPathResult
-            .ORDERED_NODE_SNAPSHOT_TYPE,
-          null
-        );
+    if (
+      type !== "radio" &&
+      type !== "checkbox"
+    ) {
+      return "";
+    }
 
-      return (
-        result.snapshotLength ===
-          1 &&
-        result.snapshotItem(
-          0
-        ) === el
+    const labelText =
+      getElementText(
+        element.closest("label")
       );
-    } catch {
+
+    if (labelText) {
+      return labelText.slice(
+        0,
+        120
+      );
+    }
+
+    const labelledBy =
+      getNonQuarantinedAttributeValue(
+        element,
+        "aria-labelledby"
+      );
+
+    if (labelledBy) {
+      const text =
+        labelledBy
+          .split(/\s+/)
+          .map(id => {
+            return getElementText(
+              document.getElementById(
+                id
+              )
+            );
+          })
+          .filter(Boolean)
+          .join(" ");
+
+      if (text) {
+        return text.slice(
+          0,
+          120
+        );
+      }
+    }
+
+    const blockText =
+      getElementText(
+        element.closest(
+          'tr, [role="row"], li, [role="option"]'
+        )
+      );
+
+    if (blockText) {
+      return blockText.slice(
+        0,
+        120
+      );
+    }
+
+    let current =
+      element.parentElement;
+
+    for (
+      let depth = 0;
+      current &&
+      depth < 4;
+      depth += 1,
+      current =
+        current.parentElement
+    ) {
+      const text =
+        getElementText(current);
+
+      if (
+        text &&
+        text.length <= 120
+      ) {
+        return text;
+      }
+    }
+
+    return "";
+  }
+
+  /*
+   * ------------------------------------------------------------------------
+   * ATTRIBUTE-AGNOSTIC GRAPH XPATH ENGINE
+   * ------------------------------------------------------------------------
+   */
+
+  function isGraphAttributeEligible(
+    attribute
+  ) {
+    if (!attribute) {
       return false;
     }
+
+    const name =
+      String(
+        attribute.name ||
+        ""
+      )
+        .trim()
+        .toLowerCase();
+
+    const value =
+      String(
+        attribute.value ||
+        ""
+      );
+
+    const trimmedValue =
+      value.trim();
+
+    if (
+      !name ||
+      !trimmedValue
+    ) {
+      return false;
+    }
+
+    if (
+      isGraphAttributeValueQuarantined(
+        trimmedValue
+      )
+    ) {
+      return false;
+    }
+
+    if (
+      name ===
+        RECORDER_INSTALL_ATTRIBUTE ||
+      name.startsWith(
+        "data-pw-recorder-"
+      )
+    ) {
+      return false;
+    }
+
+    if (/^on[a-z]/i.test(name)) {
+      return false;
+    }
+
+    if (
+      name === "style" ||
+      name === "class"
+    ) {
+      return false;
+    }
+
+    if (
+      trimmedValue.length > 220
+    ) {
+      return false;
+    }
+
+    return true;
   }
 
-  function getUniqueXPathByAttribute(
-    el,
-    attributes,
-    prefix = "//"
+  function getGraphAttributeStabilityPenalty(
+    attribute
+  ) {
+    const name =
+      String(
+        attribute.name ||
+        ""
+      );
+
+    const value =
+      String(
+        attribute.value ||
+        ""
+      ).trim();
+
+    if (
+      isGraphAttributeValueQuarantined(
+        value
+      )
+    ) {
+      return Number
+        .POSITIVE_INFINITY;
+    }
+
+    let penalty = 0;
+
+    if (value.length <= 2) {
+      penalty += 7;
+    }
+
+    if (value.length > 80) {
+      penalty += 6;
+    }
+
+    if (value.length > 140) {
+      penalty += 10;
+    }
+
+    if (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        value
+      )
+    ) {
+      penalty += 28;
+    }
+
+    if (
+      /^[0-9a-f_-]{14,}$/i.test(
+        value
+      )
+    ) {
+      penalty += 20;
+    }
+
+    if (/\d{5,}/.test(value)) {
+      penalty += 14;
+    }
+
+    const digitCount =
+      (
+        value.match(/\d/g) ||
+        []
+      ).length;
+
+    if (
+      value.length >= 6 &&
+      digitCount / value.length >
+        0.5
+    ) {
+      penalty += 12;
+    }
+
+    if (/[?&#=]/.test(value)) {
+      penalty += 6;
+    }
+
+    if (
+      /^(true|false|null|undefined|none|on|off)$/i.test(
+        value
+      )
+    ) {
+      penalty += 9;
+    }
+
+    if (name.length <= 2) {
+      penalty += 2;
+    }
+
+    return penalty;
+  }
+
+  function getGraphTextStabilityPenalty(
+    text
+  ) {
+    const value =
+      String(text || "")
+        .trim();
+
+    let penalty = 40;
+
+    if (value.length <= 3) {
+      penalty += 12;
+    }
+
+    if (value.length > 60) {
+      penalty += 5;
+    }
+
+    if (/\d{5,}/.test(value)) {
+      penalty += 16;
+    }
+
+    const digitCount =
+      (
+        value.match(/\d/g) ||
+        []
+      ).length;
+
+    if (
+      value.length >= 6 &&
+      digitCount / value.length >
+        0.4
+    ) {
+      penalty += 12;
+    }
+
+    if (
+      /\b\d{1,2}[/:.-]\d{1,2}[/:.-]\d{2,4}\b/.test(
+        value
+      ) ||
+      /\b\d{1,2}:\d{2}\b/.test(
+        value
+      )
+    ) {
+      penalty += 14;
+    }
+
+    return penalty;
+  }
+
+  function getGraphElementKindKey(
+    element
+  ) {
+    return (
+      `${element.namespaceURI || ""}` +
+      "\u0000" +
+      `${element.localName || ""}`
+    );
+  }
+
+  function createGraphAttributeKey(
+    element,
+    attributeName,
+    attributeValue
+  ) {
+    return (
+      `${getGraphElementKindKey(
+        element
+      )}` +
+      "\u0000attribute\u0000" +
+      `${attributeName}` +
+      "\u0000" +
+      `${attributeValue}`
+    );
+  }
+
+  function createGraphTextKey(
+    element,
+    normalizedText
+  ) {
+    return (
+      `${getGraphElementKindKey(
+        element
+      )}` +
+      "\u0000normalize-space\u0000" +
+      `${normalizedText}`
+    );
+  }
+
+  function compareGraphTraversalPath(
+    leftPath,
+    rightPath
+  ) {
+    const length =
+      Math.max(
+        leftPath.length,
+        rightPath.length
+      );
+
+    for (
+      let index = 0;
+      index < length;
+      index += 1
+    ) {
+      const leftValue =
+        index < leftPath.length
+          ? leftPath[index]
+          : -1;
+
+      const rightValue =
+        index < rightPath.length
+          ? rightPath[index]
+          : -1;
+
+      if (
+        leftValue !==
+        rightValue
+      ) {
+        return (
+          leftValue -
+          rightValue
+        );
+      }
+    }
+
+    return 0;
+  }
+
+  function cloneGraphTraversalPath(
+    path
+  ) {
+    return Array.isArray(path)
+      ? path.slice()
+      : [];
+  }
+
+  function appendGraphTraversalPriority(
+    path,
+    priority
+  ) {
+    return [
+      ...cloneGraphTraversalPath(
+        path
+      ),
+      priority,
+    ];
+  }
+
+  function addLocalGraphCandidate(
+    candidates,
+    localDuplicates,
+    candidate
+  ) {
+    const {
+      key,
+      element,
+    } = candidate;
+
+    if (
+      candidate.kind ===
+        "attribute" &&
+      isGraphAttributeValueQuarantined(
+        candidate.attributeValue
+      )
+    ) {
+      return;
+    }
+
+    if (
+      localDuplicates.has(key)
+    ) {
+      return;
+    }
+
+    const existing =
+      candidates.get(key);
+
+    if (
+      existing &&
+      existing.element !== element
+    ) {
+      candidates.delete(key);
+      localDuplicates.add(key);
+
+      return;
+    }
+
+    if (!existing) {
+      candidates.set(
+        key,
+        candidate
+      );
+
+      return;
+    }
+
+    /*
+     * The same candidate may be rediscovered through a different route.
+     * Preserve the route with the earlier hierarchical traversal priority.
+     */
+    const pathComparison =
+      compareGraphTraversalPath(
+        candidate.traversalPath,
+        existing.traversalPath
+      );
+
+    if (
+      pathComparison < 0 ||
+      (
+        pathComparison === 0 &&
+        candidate.graphCost <
+          existing.graphCost
+      )
+    ) {
+      candidates.set(
+        key,
+        candidate
+      );
+    }
+  }
+
+  function createGraphMinHeap() {
+    const values = [];
+
+    function compare(
+      left,
+      right
+    ) {
+      /*
+       * The hierarchical traversal path is the primary queue order.
+       *
+       * This is what guarantees:
+       *
+       * ancestor children
+       *   before ancestor self
+       *   before ancestor peers
+       *   before the next parent level.
+       */
+      const traversalComparison =
+        compareGraphTraversalPath(
+          left.traversalPath,
+          right.traversalPath
+        );
+
+      if (
+        traversalComparison !== 0
+      ) {
+        return traversalComparison;
+      }
+
+      /*
+       * COLLECT states should run before another state with the exact same
+       * traversal path.
+       */
+      const leftModePriority =
+        left.mode === "COLLECT"
+          ? 0
+          : 1;
+
+      const rightModePriority =
+        right.mode === "COLLECT"
+          ? 0
+          : 1;
+
+      if (
+        leftModePriority !==
+        rightModePriority
+      ) {
+        return (
+          leftModePriority -
+          rightModePriority
+        );
+      }
+
+      if (left.cost !== right.cost) {
+        return (
+          left.cost -
+          right.cost
+        );
+      }
+
+      if (
+        left.pathFromTarget.length !==
+        right.pathFromTarget.length
+      ) {
+        return (
+          left.pathFromTarget.length -
+          right.pathFromTarget.length
+        );
+      }
+
+      return (
+        left.sequence -
+        right.sequence
+      );
+    }
+
+    function push(value) {
+      values.push(value);
+
+      let index =
+        values.length - 1;
+
+      while (index > 0) {
+        const parentIndex =
+          Math.floor(
+            (index - 1) / 2
+          );
+
+        if (
+          compare(
+            values[parentIndex],
+            values[index]
+          ) <= 0
+        ) {
+          break;
+        }
+
+        [
+          values[parentIndex],
+          values[index],
+        ] = [
+          values[index],
+          values[parentIndex],
+        ];
+
+        index =
+          parentIndex;
+      }
+    }
+
+    function pop() {
+      if (!values.length) {
+        return null;
+      }
+
+      const first =
+        values[0];
+
+      const last =
+        values.pop();
+
+      if (
+        values.length &&
+        last
+      ) {
+        values[0] =
+          last;
+
+        let index = 0;
+
+        while (true) {
+          const leftIndex =
+            index * 2 + 1;
+
+          const rightIndex =
+            leftIndex + 1;
+
+          let smallestIndex =
+            index;
+
+          if (
+            leftIndex <
+              values.length &&
+            compare(
+              values[leftIndex],
+              values[smallestIndex]
+            ) < 0
+          ) {
+            smallestIndex =
+              leftIndex;
+          }
+
+          if (
+            rightIndex <
+              values.length &&
+            compare(
+              values[rightIndex],
+              values[smallestIndex]
+            ) < 0
+          ) {
+            smallestIndex =
+              rightIndex;
+          }
+
+          if (
+            smallestIndex ===
+            index
+          ) {
+            break;
+          }
+
+          [
+            values[index],
+            values[smallestIndex],
+          ] = [
+            values[smallestIndex],
+            values[index],
+          ];
+
+          index =
+            smallestIndex;
+        }
+      }
+
+      return first;
+    }
+
+    return {
+      push,
+      pop,
+
+      get size() {
+        return values.length;
+      },
+    };
+  }
+
+  function isGraphSearchElementAllowed(
+    element,
+    target
+  ) {
+    if (
+      !(
+        element instanceof
+        Element
+      ) ||
+      !element.isConnected ||
+      element.ownerDocument !==
+        target.ownerDocument
+    ) {
+      return false;
+    }
+
+    if (
+      element.tagName === "HTML" ||
+      element.tagName === "BODY" ||
+      element.tagName
+        ?.toLowerCase() ===
+        "x-pw-glass"
+    ) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function getGraphSampledChildren(
+    element
+  ) {
+    const children =
+      Array.from(
+        element.children ||
+        []
+      );
+
+    if (
+      children.length <=
+      GRAPH_XPATH_MAX_CHILDREN_PER_NODE
+    ) {
+      return children;
+    }
+
+    const selected = [];
+    const selectedIndexes =
+      new Set();
+
+    for (
+      let index = 0;
+      index <
+        GRAPH_XPATH_MAX_CHILDREN_PER_NODE;
+      index += 1
+    ) {
+      const childIndex =
+        Math.round(
+          (
+            index *
+            (children.length - 1)
+          ) /
+          (
+            GRAPH_XPATH_MAX_CHILDREN_PER_NODE -
+            1
+          )
+        );
+
+      if (
+        selectedIndexes.has(
+          childIndex
+        )
+      ) {
+        continue;
+      }
+
+      selectedIndexes.add(
+        childIndex
+      );
+
+      selected.push(
+        children[childIndex]
+      );
+    }
+
+    return selected;
+  }
+
+  function getGraphEdge(
+    from,
+    to,
+    type
+  ) {
+    return {
+      from,
+      to,
+      type,
+      cost:
+        GRAPH_EDGE_COST[type],
+    };
+  }
+
+  function pushGraphExpansionState(
+    queue,
+    target,
+    state,
+    destination,
+    edgeType,
+    traversalPriority,
+    isAncestor,
+    nextSequence
+  ) {
+    if (
+      !isGraphSearchElementAllowed(
+        destination,
+        target
+      )
+    ) {
+      return nextSequence;
+    }
+
+    const edge =
+      getGraphEdge(
+        state.element,
+        destination,
+        edgeType
+      );
+
+    const nextCost =
+      state.cost +
+      edge.cost;
+
+    if (
+      nextCost >
+      GRAPH_XPATH_MAX_COST
+    ) {
+      return nextSequence;
+    }
+
+    queue.push({
+      mode:
+        "EXPAND",
+
+      element:
+        destination,
+
+      cost:
+        nextCost,
+
+      isAncestor,
+
+      traversalPath:
+        appendGraphTraversalPriority(
+          state.traversalPath,
+          traversalPriority
+        ),
+
+      pathFromTarget: [
+        ...state.pathFromTarget,
+        edge,
+      ],
+
+      sequence:
+        nextSequence,
+    });
+
+    return nextSequence + 1;
+  }
+
+  function pushGraphCollectState(
+    queue,
+    state,
+    traversalPriority,
+    nextSequence
+  ) {
+    queue.push({
+      mode:
+        "COLLECT",
+
+      element:
+        state.element,
+
+      cost:
+        state.cost,
+
+      isAncestor:
+        state.isAncestor,
+
+      traversalPath:
+        appendGraphTraversalPriority(
+          state.traversalPath,
+          traversalPriority
+        ),
+
+      pathFromTarget:
+        state.pathFromTarget
+          .slice(),
+
+      sequence:
+        nextSequence,
+    });
+
+    return nextSequence + 1;
+  }
+
+  function collectGraphCandidatesFromState(
+    state,
+    candidates,
+    localDuplicates,
+    traversalOrder
   ) {
     for (
       const attribute of
-      attributes
+      Array.from(
+        state.element.attributes ||
+        []
+      )
     ) {
-      const options =
-        attribute ===
-        "data-testid"
-          ? getTestIdXPathOptions(
-              el
-            )
-          : [
-              [
-                attribute,
-                getAttributeValue(
-                  el,
-                  attribute
-                ),
-              ],
-            ];
+      if (
+        !isGraphAttributeEligible(
+          attribute
+        )
+      ) {
+        continue;
+      }
 
-      for (
-        const [
-          attributeName,
-          value,
-        ] of options
+      const value =
+        String(attribute.value);
+
+      if (
+        isGraphAttributeValueQuarantined(
+          value
+        )
+      ) {
+        continue;
+      }
+
+      const key =
+        createGraphAttributeKey(
+          state.element,
+          attribute.name,
+          value
+        );
+
+      addLocalGraphCandidate(
+        candidates,
+        localDuplicates,
+        {
+          kind:
+            "attribute",
+
+          key,
+
+          element:
+            state.element,
+
+          attributeName:
+            attribute.name,
+
+          attributeValue:
+            value,
+
+          graphCost:
+            state.cost,
+
+          traversalOrder,
+
+          traversalPath:
+            cloneGraphTraversalPath(
+              state.traversalPath
+            ),
+
+          stabilityPenalty:
+            getGraphAttributeStabilityPenalty(
+              attribute
+            ),
+
+          pathFromTarget:
+            state.pathFromTarget
+              .slice(),
+        }
+      );
+    }
+
+    const normalizedText =
+      getGraphNormalizedText(
+        state.element
+      );
+
+    if (
+      normalizedText &&
+      normalizedText.length <= 80
+    ) {
+      const key =
+        createGraphTextKey(
+          state.element,
+          normalizedText
+        );
+
+      addLocalGraphCandidate(
+        candidates,
+        localDuplicates,
+        {
+          kind:
+            "text",
+
+          key,
+
+          element:
+            state.element,
+
+          textValue:
+            normalizedText,
+
+          graphCost:
+            state.cost,
+
+          traversalOrder,
+
+          traversalPath:
+            cloneGraphTraversalPath(
+              state.traversalPath
+            ),
+
+          stabilityPenalty:
+            getGraphTextStabilityPenalty(
+              normalizedText
+            ),
+
+          pathFromTarget:
+            state.pathFromTarget
+              .slice(),
+        }
+      );
+    }
+  }
+
+  /*
+   * Ancestor-aware bounded graph traversal.
+   *
+   * When an ancestor is reached, the ancestor is not collected immediately.
+   * Instead, the queue is staged as:
+   *
+   *   ancestor children
+   *   ancestor self
+   *   ancestor sibling peers
+   *   ancestor parent
+   *
+   * Child states can recursively inspect their own descendants before the
+   * ancestor SELF state is popped because they retain the CHILDREN prefix.
+   */
+  function collectGraphCandidates(
+    target
+  ) {
+    const candidates =
+      new Map();
+
+    const localDuplicates =
+      new Set();
+
+    const expandedElements =
+      new Set();
+
+    const collectedElements =
+      new Set();
+
+    const bestExpansionCost =
+      new Map();
+
+    const queue =
+      createGraphMinHeap();
+
+    let queueSequence = 0;
+    let traversalOrder = 0;
+    let visitedCount = 0;
+
+    queue.push({
+      mode:
+        "EXPAND",
+
+      element:
+        target,
+
+      cost:
+        0,
+
+      isAncestor:
+        false,
+
+      traversalPath:
+        [],
+
+      pathFromTarget:
+        [],
+
+      sequence:
+        queueSequence,
+    });
+
+    queueSequence += 1;
+
+    bestExpansionCost.set(
+      target,
+      0
+    );
+
+    while (
+      queue.size &&
+      visitedCount <
+        GRAPH_XPATH_MAX_VISITED
+    ) {
+      const state =
+        queue.pop();
+
+      if (!state) {
+        break;
+      }
+
+      if (
+        state.cost >
+        GRAPH_XPATH_MAX_COST
+      ) {
+        continue;
+      }
+
+      if (
+        state.mode === "COLLECT"
       ) {
         if (
-          !isMeaningfulAttributeValue(
-            attributeName,
-            value
-          ) ||
-          !value
+          collectedElements.has(
+            state.element
+          )
         ) {
           continue;
         }
 
-        const xpath =
-          `${prefix}` +
-          `${
-            el.tagName
-              .toLowerCase()
-          }` +
-          `[@${attributeName}=` +
-          `${escapeXPathLiteral(
-            value
-          )}]`;
+        collectedElements.add(
+          state.element
+        );
 
+        collectGraphCandidatesFromState(
+          state,
+          candidates,
+          localDuplicates,
+          traversalOrder
+        );
+
+        traversalOrder += 1;
+        visitedCount += 1;
+
+        continue;
+      }
+
+      const previousBestCost =
+        bestExpansionCost.get(
+          state.element
+        );
+
+      if (
+        previousBestCost !== undefined &&
+        previousBestCost <
+          state.cost
+      ) {
+        continue;
+      }
+
+      if (
+        expandedElements.has(
+          state.element
+        )
+      ) {
+        continue;
+      }
+
+      expandedElements.add(
+        state.element
+      );
+
+      /*
+       * A normal element, including the original target and peer elements,
+       * may be collected immediately.
+       *
+       * An ancestor is delayed until its children have been queued first.
+       */
+      if (!state.isAncestor) {
         if (
-          xpath &&
-          isAcceptableXPath(
-            xpath
-          ) &&
-          isUniqueXPath(
-            xpath,
-            el
+          !collectedElements.has(
+            state.element
           )
         ) {
-          return xpath;
+          collectedElements.add(
+            state.element
+          );
+
+          collectGraphCandidatesFromState(
+            state,
+            candidates,
+            localDuplicates,
+            traversalOrder
+          );
+
+          traversalOrder += 1;
+          visitedCount += 1;
+        }
+      }
+
+      /*
+       * Phase 1: traverse children first.
+       *
+       * For a parent/ancestor, this traverses the path child and the path
+       * child's siblings before the parent itself becomes an anchor.
+       */
+      for (
+        const child of
+        getGraphSampledChildren(
+          state.element
+        )
+      ) {
+        const nextCost =
+          state.cost +
+          GRAPH_EDGE_COST.CHILD;
+
+        const previousCost =
+          bestExpansionCost.get(
+            child
+          );
+
+        if (
+          previousCost !== undefined &&
+          previousCost <= nextCost
+        ) {
+          continue;
+        }
+
+        bestExpansionCost.set(
+          child,
+          nextCost
+        );
+
+        queueSequence =
+          pushGraphExpansionState(
+            queue,
+            target,
+            state,
+            child,
+            "CHILD",
+            GRAPH_TRAVERSAL_PRIORITY
+              .CHILDREN,
+            false,
+            queueSequence
+          );
+      }
+
+      /*
+       * Phase 2: after an ancestor's children, collect the ancestor itself.
+       */
+      if (state.isAncestor) {
+        queueSequence =
+          pushGraphCollectState(
+            queue,
+            state,
+            GRAPH_TRAVERSAL_PRIORITY
+              .SELF,
+            queueSequence
+          );
+      }
+
+      /*
+       * Phase 3: inspect this element's sibling peers.
+       *
+       * When state.isAncestor is true, these are the parent's peers.
+       */
+      const siblingStates = [
+        {
+          element:
+            state.element
+              .previousElementSibling,
+
+          type:
+            "PREVIOUS_SIBLING",
+        },
+        {
+          element:
+            state.element
+              .nextElementSibling,
+
+          type:
+            "NEXT_SIBLING",
+        },
+      ];
+
+      for (
+        const siblingState of
+        siblingStates
+      ) {
+        const sibling =
+          siblingState.element;
+
+        if (
+          !isGraphSearchElementAllowed(
+            sibling,
+            target
+          )
+        ) {
+          continue;
+        }
+
+        const nextCost =
+          state.cost +
+          GRAPH_EDGE_COST[
+            siblingState.type
+          ];
+
+        const previousCost =
+          bestExpansionCost.get(
+            sibling
+          );
+
+        if (
+          previousCost !== undefined &&
+          previousCost <= nextCost
+        ) {
+          continue;
+        }
+
+        bestExpansionCost.set(
+          sibling,
+          nextCost
+        );
+
+        queueSequence =
+          pushGraphExpansionState(
+            queue,
+            target,
+            state,
+            sibling,
+            siblingState.type,
+            GRAPH_TRAVERSAL_PRIORITY
+              .SIBLING_PEERS,
+            false,
+            queueSequence
+          );
+      }
+
+      /*
+       * Phase 4: ascend only after children, self and sibling peers.
+       */
+      const parent =
+        state.element.parentElement;
+
+      if (
+        isGraphSearchElementAllowed(
+          parent,
+          target
+        )
+      ) {
+        const nextCost =
+          state.cost +
+          GRAPH_EDGE_COST.PARENT;
+
+        const previousCost =
+          bestExpansionCost.get(
+            parent
+          );
+
+        if (
+          previousCost === undefined ||
+          nextCost < previousCost
+        ) {
+          bestExpansionCost.set(
+            parent,
+            nextCost
+          );
+
+          queueSequence =
+            pushGraphExpansionState(
+              queue,
+              target,
+              state,
+              parent,
+              "PARENT",
+              GRAPH_TRAVERSAL_PRIORITY
+                .ASCEND_TO_PARENT,
+              true,
+              queueSequence
+            );
         }
       }
     }
 
-    return "";
+    return candidates;
   }
 
-  function getUniqueXPathAnchor(
-    el
+  function recordGraphCandidateOccurrence(
+    candidates,
+    seenOnce,
+    key,
+    element
   ) {
-    const attributeMatch =
-      getUniqueXPathByAttribute(
-        el,
-        SELECTOR_ATTRS
-      );
-
-    if (attributeMatch) {
-      return attributeMatch;
+    if (!candidates.has(key)) {
+      return;
     }
 
-    const extendedAttributeMatch =
-      getUniqueXPathByAttribute(
-        el,
-        [
-          "title",
-          "type",
-        ]
-      );
+    if (seenOnce.has(key)) {
+      candidates.delete(key);
+      seenOnce.delete(key);
 
-    if (
-      extendedAttributeMatch
-    ) {
-      return (
-        extendedAttributeMatch
-      );
+      return;
     }
 
-    const tag =
-      el.tagName
-        .toLowerCase();
+    seenOnce.set(
+      key,
+      element
+    );
+  }
 
-    const text =
-      getShortText(el);
+  function proveGraphCandidateUniqueness(
+    target,
+    candidates
+  ) {
+    if (!candidates.size) {
+      return candidates;
+    }
 
-    if (
-      text &&
-      canUseTextForXPath(
-        el
+    for (
+      const [
+        key,
+        candidate,
+      ] of Array.from(
+        candidates.entries()
       )
     ) {
-      const xpath =
+      if (
+        candidate.kind ===
+          "attribute" &&
+        isGraphAttributeValueQuarantined(
+          candidate.attributeValue
+        )
+      ) {
+        candidates.delete(key);
+      }
+    }
+
+    if (!candidates.size) {
+      return candidates;
+    }
+
+    const attributeNamesByKind =
+      new Map();
+
+    const textValuesByKind =
+      new Map();
+
+    for (
+      const candidate of
+      candidates.values()
+    ) {
+      const elementKind =
+        getGraphElementKindKey(
+          candidate.element
+        );
+
+      if (
+        candidate.kind ===
+        "text"
+      ) {
+        let values =
+          textValuesByKind.get(
+            elementKind
+          );
+
+        if (!values) {
+          values =
+            new Set();
+
+          textValuesByKind.set(
+            elementKind,
+            values
+          );
+        }
+
+        values.add(
+          candidate.textValue
+        );
+
+        continue;
+      }
+
+      let names =
+        attributeNamesByKind.get(
+          elementKind
+        );
+
+      if (!names) {
+        names =
+          new Set();
+
+        attributeNamesByKind.set(
+          elementKind,
+          names
+        );
+      }
+
+      names.add(
+        candidate.attributeName
+      );
+    }
+
+    const seenOnce =
+      new Map();
+
+    const doc =
+      target.ownerDocument ||
+      document;
+
+    const root =
+      doc.documentElement;
+
+    if (!root) {
+      candidates.clear();
+
+      return candidates;
+    }
+
+    const showElement =
+      doc.defaultView
+        ?.NodeFilter
+        ?.SHOW_ELEMENT ||
+      1;
+
+    const walker =
+      doc.createTreeWalker(
+        root,
+        showElement
+      );
+
+    let element =
+      walker.currentNode;
+
+    while (
+      element &&
+      candidates.size
+    ) {
+      const elementKind =
+        getGraphElementKindKey(
+          element
+        );
+
+      const relevantAttributeNames =
+        attributeNamesByKind.get(
+          elementKind
+        );
+
+      if (relevantAttributeNames) {
+        if (
+          element.attributes.length <=
+          relevantAttributeNames.size
+        ) {
+          for (
+            const attribute of
+            Array.from(
+              element.attributes
+            )
+          ) {
+            if (
+              !relevantAttributeNames.has(
+                attribute.name
+              )
+            ) {
+              continue;
+            }
+
+            if (
+              isGraphAttributeValueQuarantined(
+                attribute.value
+              )
+            ) {
+              continue;
+            }
+
+            const key =
+              createGraphAttributeKey(
+                element,
+                attribute.name,
+                attribute.value
+              );
+
+            recordGraphCandidateOccurrence(
+              candidates,
+              seenOnce,
+              key,
+              element
+            );
+          }
+        } else {
+          for (
+            const attributeName of
+            relevantAttributeNames
+          ) {
+            if (
+              !element.hasAttribute(
+                attributeName
+              )
+            ) {
+              continue;
+            }
+
+            const value =
+              element.getAttribute(
+                attributeName
+              );
+
+            if (
+              isGraphAttributeValueQuarantined(
+                value
+              )
+            ) {
+              continue;
+            }
+
+            const key =
+              createGraphAttributeKey(
+                element,
+                attributeName,
+                value
+              );
+
+            recordGraphCandidateOccurrence(
+              candidates,
+              seenOnce,
+              key,
+              element
+            );
+          }
+        }
+      }
+
+      const relevantTextValues =
+        textValuesByKind.get(
+          elementKind
+        );
+
+      if (relevantTextValues) {
+        const normalizedText =
+          getGraphNormalizedText(
+            element
+          );
+
+        if (
+          normalizedText &&
+          relevantTextValues.has(
+            normalizedText
+          )
+        ) {
+          const key =
+            createGraphTextKey(
+              element,
+              normalizedText
+            );
+
+          recordGraphCandidateOccurrence(
+            candidates,
+            seenOnce,
+            key,
+            element
+          );
+        }
+      }
+
+      element =
+        walker.nextNode();
+    }
+
+    for (
+      const [
+        key,
+        candidate,
+      ] of Array.from(
+        candidates.entries()
+      )
+    ) {
+      if (
+        seenOnce.get(key) !==
+        candidate.element
+      ) {
+        candidates.delete(key);
+      }
+    }
+
+    return candidates;
+  }
+
+  function getGraphTextSnippet(
+    value
+  ) {
+    const normalized =
+      String(value || "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    if (
+      normalized.length < 12
+    ) {
+      return "";
+    }
+
+    const tentative =
+      normalized.slice(0, 48);
+
+    const lastSpace =
+      tentative.lastIndexOf(" ");
+
+    if (lastSpace >= 16) {
+      return tentative
+        .slice(0, lastSpace)
+        .trim();
+    }
+
+    return tentative.trim();
+  }
+
+  function deriveGraphStableFragments(
+    rawValue
+  ) {
+    const value =
+      String(rawValue || "")
+        .trim();
+
+    if (
+      isGraphAttributeValueQuarantined(
+        value
+      )
+    ) {
+      return [];
+    }
+
+    if (value.length < 6) {
+      return [];
+    }
+
+    const fragments =
+      new Set();
+
+    const addFragment =
+      fragment => {
+        const cleaned =
+          String(fragment || "")
+            .replace(
+              /^[\s_.:/?#&=-]+|[\s_.:/?#&=-]+$/g,
+              ""
+            )
+            .trim();
+
+        if (
+          !cleaned ||
+          isGraphAttributeValueQuarantined(
+            cleaned
+          )
+        ) {
+          return;
+        }
+
+        if (
+          cleaned.length < 5 ||
+          cleaned.length >=
+            value.length ||
+          /^\d+$/.test(cleaned)
+        ) {
+          return;
+        }
+
+        fragments.add(cleaned);
+      };
+
+    for (
+      const fragment of
+      value.split(
+        /(?:\d{2,}|[0-9a-f]{10,}|[?&#=]+)/gi
+      )
+    ) {
+      addFragment(fragment);
+    }
+
+    for (
+      const fragment of
+      value.split(
+        /[\s_.:/?#&=-]+/
+      )
+    ) {
+      addFragment(fragment);
+    }
+
+    const prefixMatch =
+      value.match(/^[^\d]{5,}/);
+
+    if (prefixMatch) {
+      addFragment(
+        prefixMatch[0]
+      );
+    }
+
+    const suffixMatch =
+      value.match(/[^\d]{5,}$/);
+
+    if (suffixMatch) {
+      addFragment(
+        suffixMatch[0]
+      );
+    }
+
+    return Array.from(fragments)
+      .sort(
+        (
+          left,
+          right
+        ) =>
+          right.length -
+          left.length
+      )
+      .slice(0, 3);
+  }
+
+  function getGraphExactAttributePredicate(
+    attributeName,
+    attributeValue
+  ) {
+    return (
+      `@*[name()=` +
+      `${xpathLiteral(
+        attributeName
+      )}` +
+      ` and .=` +
+      `${xpathLiteral(
+        attributeValue
+      )}]`
+    );
+  }
+
+  function getGraphStartsWithAttributePredicate(
+    attributeName,
+    fragment
+  ) {
+    return (
+      `@*[name()=` +
+      `${xpathLiteral(
+        attributeName
+      )}` +
+      ` and starts-with(., ` +
+      `${xpathLiteral(
+        fragment
+      )})]`
+    );
+  }
+
+  function getGraphContainsAttributePredicate(
+    attributeName,
+    fragments
+  ) {
+    const conditions =
+      fragments.map(
+        fragment => {
+          return (
+            `contains(., ` +
+            `${xpathLiteral(
+              fragment
+            )})`
+          );
+        }
+      );
+
+    return (
+      `@*[name()=` +
+      `${xpathLiteral(
+        attributeName
+      )}` +
+      ` and ` +
+      `${conditions.join(
+        " and "
+      )}]`
+    );
+  }
+
+  function isAcceptableGraphXPath(
+    xpath
+  ) {
+    return (
+      !!xpath &&
+      xpath.length <=
+        GRAPH_XPATH_MAX_LENGTH
+    );
+  }
+
+  function containsNumericPosition(
+    xpath
+  ) {
+    return /\[\s*\d+\s*\]/.test(
+      xpath
+    );
+  }
+
+  function containsQuarantinedAttributeValue(
+    xpath
+  ) {
+    const normalizedXPath =
+      String(xpath || "")
+        .toLowerCase();
+
+    return GRAPH_ATTRIBUTE_VALUE_QUARANTINE
+      .some(fragment => {
+        const normalizedFragment =
+          String(fragment || "")
+            .trim()
+            .toLowerCase();
+
+        return (
+          !!normalizedFragment &&
+          normalizedXPath.includes(
+            normalizedFragment
+          )
+        );
+      });
+  }
+
+  function pushGraphVariant(
+    variants,
+    seen,
+    variant
+  ) {
+    if (
+      !variant?.xpath ||
+      seen.has(variant.xpath) ||
+      !isAcceptableGraphXPath(
+        variant.xpath
+      ) ||
+      containsNumericPosition(
+        variant.xpath
+      ) ||
+      containsQuarantinedAttributeValue(
+        variant.xpath
+      )
+    ) {
+      return;
+    }
+
+    seen.add(variant.xpath);
+    variants.push(variant);
+  }
+
+  function getGraphAnchorVariants(
+    candidate
+  ) {
+    const variants = [];
+    const seen =
+      new Set();
+
+    const element =
+      candidate.element;
+
+    const tag =
+      getXPathTag(element);
+
+    if (
+      candidate.kind ===
+      "text"
+    ) {
+      const exactTextXPath =
         `//${tag}` +
         `[normalize-space(.)=` +
-        `${escapeXPathLiteral(
-          text
+        `${xpathLiteral(
+          candidate.textValue
         )}]`;
 
       if (
-        isAcceptableXPath(
-          xpath
-        ) &&
-        isUniqueXPath(
-          xpath,
-          el
+        matchesOnlyElement(
+          exactTextXPath,
+          element
         )
       ) {
-        return xpath;
+        pushGraphVariant(
+          variants,
+          seen,
+          {
+            xpath:
+              exactTextXPath,
+
+            score:
+              0,
+
+            strategy:
+              "normalize-space-anchor",
+          }
+        );
       }
-    }
 
-    const longTextSnippet =
-      getLongTextSnippet(
-        el
-      );
-
-    if (
-      longTextSnippet &&
-      canUseTextForXPath(
-        el
-      )
-    ) {
-      const xpath =
-        `//${tag}` +
-        `[contains(normalize-space(.), ` +
-        `${escapeXPathLiteral(
-          longTextSnippet
-        )})]`;
+      const snippet =
+        getGraphTextSnippet(
+          candidate.textValue
+        );
 
       if (
-        isAcceptableXPath(
-          xpath
-        ) &&
-        isUniqueXPath(
-          xpath,
-          el
+        snippet &&
+        snippet !==
+          candidate.textValue
+      ) {
+        const containsTextXPath =
+          `//${tag}` +
+          `[contains(normalize-space(.), ` +
+          `${xpathLiteral(
+            snippet
+          )})]`;
+
+        if (
+          matchesOnlyElement(
+            containsTextXPath,
+            element
+          )
+        ) {
+          pushGraphVariant(
+            variants,
+            seen,
+            {
+              xpath:
+                containsTextXPath,
+
+              score:
+                12,
+
+              strategy:
+                "contains-normalized-text-anchor",
+            }
+          );
+        }
+      }
+
+      return variants;
+    }
+
+    if (
+      isGraphAttributeValueQuarantined(
+        candidate.attributeValue
+      )
+    ) {
+      return variants;
+    }
+
+    const exactXPath =
+      `//${tag}` +
+      `[` +
+      `${getGraphExactAttributePredicate(
+        candidate.attributeName,
+        candidate.attributeValue
+      )}]`;
+
+    pushGraphVariant(
+      variants,
+      seen,
+      {
+        xpath:
+          exactXPath,
+
+        score:
+          0,
+
+        strategy:
+          "exact-attribute-anchor",
+      }
+    );
+
+    const fragments =
+      deriveGraphStableFragments(
+        candidate.attributeValue
+      );
+
+    for (
+      const fragment of
+      fragments
+    ) {
+      if (
+        isGraphAttributeValueQuarantined(
+          fragment
         )
       ) {
-        return xpath;
+        continue;
+      }
+
+      if (
+        String(
+          candidate.attributeValue
+        ).startsWith(fragment)
+      ) {
+        const startsWithXPath =
+          `//${tag}` +
+          `[` +
+          `${getGraphStartsWithAttributePredicate(
+            candidate.attributeName,
+            fragment
+          )}]`;
+
+        if (
+          matchesOnlyElement(
+            startsWithXPath,
+            element
+          )
+        ) {
+          pushGraphVariant(
+            variants,
+            seen,
+            {
+              xpath:
+                startsWithXPath,
+
+              score:
+                8,
+
+              strategy:
+                "starts-with-attribute-anchor",
+            }
+          );
+        }
+      }
+
+      const containsXPath =
+        `//${tag}` +
+        `[` +
+        `${getGraphContainsAttributePredicate(
+          candidate.attributeName,
+          [fragment]
+        )}]`;
+
+      if (
+        matchesOnlyElement(
+          containsXPath,
+          element
+        )
+      ) {
+        pushGraphVariant(
+          variants,
+          seen,
+          {
+            xpath:
+              containsXPath,
+
+            score:
+              10,
+
+            strategy:
+              "contains-attribute-anchor",
+          }
+        );
       }
     }
 
-    return "";
+    if (fragments.length >= 2) {
+      const combinedXPath =
+        `//${tag}` +
+        `[` +
+        `${getGraphContainsAttributePredicate(
+          candidate.attributeName,
+          fragments.slice(0, 2)
+        )}]`;
+
+      if (
+        matchesOnlyElement(
+          combinedXPath,
+          element
+        )
+      ) {
+        pushGraphVariant(
+          variants,
+          seen,
+          {
+            xpath:
+              combinedXPath,
+
+            score:
+              9,
+
+            strategy:
+              "multi-contains-attribute-anchor",
+          }
+        );
+      }
+    }
+
+    return variants;
   }
 
-  function getXPathCandidates(
-    el,
-    prefix = "//"
+  function getGraphScopedNodeVariants(
+    element,
+    allowText = false
   ) {
     if (
       !(
-        el instanceof
+        element instanceof
         Element
       )
     ) {
@@ -1927,396 +2752,1345 @@ function injectListeners() {
     }
 
     const tag =
-      el.tagName
-        .toLowerCase();
+      getXPathTag(element);
 
-    const candidates = [];
+    const variants = [];
+    const seen =
+      new Set();
 
-    const push = predicate => {
-      if (!predicate) {
+    const pushVariant = (
+      nodeTest,
+      score,
+      strategy
+    ) => {
+      if (
+        !nodeTest ||
+        seen.has(nodeTest) ||
+        containsNumericPosition(
+          nodeTest
+        ) ||
+        containsQuarantinedAttributeValue(
+          nodeTest
+        )
+      ) {
         return;
       }
 
-      const xpath =
-        `${prefix}${tag}` +
-        `[${predicate}]`;
+      seen.add(nodeTest);
 
-      if (
-        !candidates.includes(
-          xpath
-        )
-      ) {
-        candidates.push(
-          xpath
-        );
-      }
+      variants.push({
+        nodeTest,
+        score,
+        strategy,
+      });
     };
 
+    const attributes =
+      Array.from(
+        element.attributes ||
+        []
+      )
+        .filter(
+          isGraphAttributeEligible
+        )
+        .filter(attribute => {
+          return !isGraphAttributeValueQuarantined(
+            attribute.value
+          );
+        })
+        .map(attribute => {
+          return {
+            attribute,
+
+            penalty:
+              getGraphAttributeStabilityPenalty(
+                attribute
+              ),
+          };
+        })
+        .filter(candidate => {
+          return Number.isFinite(
+            candidate.penalty
+          );
+        })
+        .sort(
+          (
+            left,
+            right
+          ) =>
+            left.penalty -
+            right.penalty
+        );
+
     for (
-      const attribute of
-      XPATH_CANDIDATE_ATTRS
+      const {
+        attribute,
+        penalty,
+      } of attributes
     ) {
-      const options =
-        attribute ===
-        "data-testid"
-          ? getTestIdXPathOptions(
-              el
-            )
-          : [
-              [
-                attribute,
-                getAttributeValue(
-                  el,
-                  attribute
-                ),
-              ],
-            ];
+      pushVariant(
+        `${tag}[` +
+        `${getGraphExactAttributePredicate(
+          attribute.name,
+          attribute.value
+        )}]`,
+        penalty,
+        "scoped-exact-attribute"
+      );
+
+      const fragments =
+        deriveGraphStableFragments(
+          attribute.value
+        );
 
       for (
-        const [
-          attributeName,
-          value,
-        ] of options
+        const fragment of
+        fragments
       ) {
         if (
-          !isMeaningfulAttributeValue(
-            attributeName,
-            value
-          ) ||
-          !value
+          isGraphAttributeValueQuarantined(
+            fragment
+          )
         ) {
           continue;
         }
 
-        const xpath =
-          `${prefix}${tag}` +
-          `[@${attributeName}=` +
-          `${escapeXPathLiteral(
-            value
-          )}]`;
-
         if (
-          !candidates.includes(
-            xpath
-          )
+          String(
+            attribute.value
+          ).startsWith(fragment)
         ) {
-          candidates.push(
-            xpath
+          pushVariant(
+            `${tag}[` +
+            `${getGraphStartsWithAttributePredicate(
+              attribute.name,
+              fragment
+            )}]`,
+            penalty + 10,
+            "scoped-starts-with-attribute"
           );
         }
+
+        pushVariant(
+          `${tag}[` +
+          `${getGraphContainsAttributePredicate(
+            attribute.name,
+            [fragment]
+          )}]`,
+          penalty + 14,
+          "scoped-contains-attribute"
+        );
       }
     }
 
-    const text =
-      getShortText(el);
+    if (allowText) {
+      const normalizedText =
+        getGraphNormalizedText(
+          element
+        );
 
-    if (
-      text &&
-      canUseTextForXPath(
-        el
-      )
-    ) {
-      push(
-        `normalize-space(.)=` +
-        `${escapeXPathLiteral(
-          text
-        )}`
-      );
+      if (
+        normalizedText &&
+        normalizedText.length <= 80
+      ) {
+        pushVariant(
+          `${tag}` +
+          `[normalize-space(.)=` +
+          `${xpathLiteral(
+            normalizedText
+          )}]`,
+          100,
+          "scoped-normalize-space"
+        );
+      }
+
+      const snippet =
+        getGraphTextSnippet(
+          normalizedText
+        );
+
+      if (snippet) {
+        pushVariant(
+          `${tag}` +
+          `[contains(normalize-space(.), ` +
+          `${xpathLiteral(
+            snippet
+          )})]`,
+          115,
+          "scoped-contains-normalized-text"
+        );
+      }
     }
 
-    const longTextSnippet =
-      getLongTextSnippet(
-        el
-      );
-
-    if (
-      longTextSnippet &&
-      canUseTextForXPath(
-        el
+    return variants
+      .sort(
+        (
+          left,
+          right
+        ) =>
+          left.score -
+          right.score
       )
-    ) {
-      push(
-        `contains(normalize-space(.), ` +
-        `${escapeXPathLiteral(
-          longTextSnippet
-        )})`
-      );
-    }
-
-    return candidates;
+      .slice(0, 24);
   }
 
-  function isUniqueXPathInScope(
-    xpath,
-    scopeEl,
-    el
+  function buildGraphPredicateChain(
+    anchor,
+    target,
+    allowText = false
   ) {
-    try {
-      const result =
-        document.evaluate(
-          xpath,
-          scopeEl,
-          null,
-          XPathResult
-            .ORDERED_NODE_SNAPSHOT_TYPE,
+    if (
+      !(
+        anchor instanceof
+        Element
+      ) ||
+      !(
+        target instanceof
+        Element
+      )
+    ) {
+      return null;
+    }
+
+    if (anchor === target) {
+      return {
+        suffix:
+          "",
+
+        score:
+          0,
+
+        strategies:
+          [],
+      };
+    }
+
+    if (!anchor.contains(target)) {
+      return null;
+    }
+
+    const memo =
+      new Map();
+
+    function solve(
+      scopeElement
+    ) {
+      if (
+        scopeElement ===
+        target
+      ) {
+        return {
+          suffix:
+            "",
+
+          score:
+            0,
+
+          strategies:
+            [],
+        };
+      }
+
+      if (
+        memo.has(
+          scopeElement
+        )
+      ) {
+        return memo.get(
+          scopeElement
+        );
+      }
+
+      const lineage = [];
+
+      let current =
+        target;
+
+      while (
+        current &&
+        current !== scopeElement
+      ) {
+        lineage.push(current);
+
+        current =
+          current.parentElement;
+      }
+
+      if (
+        current !==
+        scopeElement
+      ) {
+        memo.set(
+          scopeElement,
           null
         );
 
-      return (
-        result.snapshotLength ===
-          1 &&
-        result.snapshotItem(
-          0
-        ) === el
-      );
-    } catch {
-      return false;
-    }
-  }
-
-  function getUniqueScopedXPath(
-    scopeEl,
-    el
-  ) {
-    const candidates =
-      getXPathCandidates(
-        el,
-        ".//"
-      );
-
-    for (
-      const xpath of
-      candidates
-    ) {
-      if (
-        isAcceptableXPath(
-          xpath
-        ) &&
-        isUniqueXPathInScope(
-          xpath,
-          scopeEl,
-          el
-        )
-      ) {
-        return xpath;
+        return null;
       }
-    }
 
-    return "";
-  }
+      let bestResult =
+        null;
 
-  function buildXPathStep(
-    el
-  ) {
-    const tag =
-      el.tagName
-        .toLowerCase();
-
-    const attributeStep =
-      getUniqueXPathByAttribute(
-        el,
-        XPATH_CANDIDATE_ATTRS,
-        ""
-      );
-
-    if (attributeStep) {
-      return (
-        attributeStep.replace(
-          /^\/\//,
-          ""
-        )
-      );
-    }
-
-    const text =
-      getShortText(el);
-
-    if (
-      text &&
-      canUseTextForXPath(
-        el
-      )
-    ) {
-      const matches =
-        Array.from(
-          el.parentElement
-            ?.children ||
-          []
-        ).filter(child => {
-          return (
-            child.tagName ===
-              el.tagName &&
-            getShortText(
-              child
-            ) === text
+      for (
+        const waypoint of
+        lineage
+      ) {
+        const waypointVariants =
+          getGraphScopedNodeVariants(
+            waypoint,
+            allowText
           );
-        });
 
-      if (
-        matches.length === 1
-      ) {
-        return (
-          `${tag}` +
-          `[normalize-space(.)=` +
-          `${escapeXPathLiteral(
-            text
-          )}]`
-        );
-      }
-    }
+        for (
+          const waypointVariant of
+          waypointVariants
+        ) {
+          const relativeXPath =
+            `.//${waypointVariant.nodeTest}`;
 
-    const longTextSnippet =
-      getLongTextSnippet(
-        el
-      );
-
-    if (
-      longTextSnippet &&
-      canUseTextForXPath(
-        el
-      )
-    ) {
-      const matches =
-        Array.from(
-          el.parentElement
-            ?.children ||
-          []
-        ).filter(child => {
-          return (
-            child.tagName ===
-              el.tagName &&
-            getElementText(
-              child
-            ).includes(
-              longTextSnippet
+          if (
+            containsQuarantinedAttributeValue(
+              relativeXPath
             )
-          );
-        });
+          ) {
+            continue;
+          }
 
-      if (
-        matches.length === 1
-      ) {
-        return (
-          `${tag}` +
-          `[contains(normalize-space(.), ` +
-          `${escapeXPathLiteral(
-            longTextSnippet
-          )})]`
-        );
+          if (
+            !matchesOnlyElementInScope(
+              scopeElement,
+              relativeXPath,
+              waypoint
+            )
+          ) {
+            continue;
+          }
+
+          const remainder =
+            waypoint === target
+              ? {
+                  suffix:
+                    "",
+
+                  score:
+                    0,
+
+                  strategies:
+                    [],
+                }
+              : solve(waypoint);
+
+          if (!remainder) {
+            continue;
+          }
+
+          const result = {
+            suffix:
+              `//${waypointVariant.nodeTest}` +
+              remainder.suffix,
+
+            score:
+              waypointVariant.score +
+              remainder.score +
+              2,
+
+            strategies: [
+              waypointVariant.strategy,
+              ...remainder.strategies,
+            ],
+          };
+
+          if (
+            containsQuarantinedAttributeValue(
+              result.suffix
+            )
+          ) {
+            continue;
+          }
+
+          if (
+            !bestResult ||
+            result.score <
+              bestResult.score ||
+            (
+              result.score ===
+                bestResult.score &&
+              result.suffix.length <
+                bestResult.suffix.length
+            )
+          ) {
+            bestResult =
+              result;
+          }
+        }
       }
-    }
 
-    const name =
-      getAttributeValue(
-        el,
-        "name"
+      memo.set(
+        scopeElement,
+        bestResult
       );
 
-    if (name) {
-      return (
-        `${tag}[@name=` +
-        `${escapeXPathLiteral(
-          name
-        )}]`
-      );
+      return bestResult;
     }
 
-    const type =
-      getAttributeValue(
-        el,
-        "type"
-      );
-
-    if (type) {
-      const matches =
-        Array.from(
-          el.parentElement
-            ?.children ||
-          []
-        ).filter(child => {
-          return (
-            child.tagName ===
-              el.tagName &&
-            getAttributeValue(
-              child,
-              "type"
-            ) === type
-          );
-        });
-
-      if (
-        matches.length === 1
-      ) {
-        return (
-          `${tag}[@type=` +
-          `${escapeXPathLiteral(
-            type
-          )}]`
-        );
-      }
-    }
-
-    return (
-      `${tag}` +
-      `[${getSiblingIndex(
-        el
-      )}]`
-    );
+    return solve(anchor);
   }
 
-  function buildPathFromAncestor(
-    ancestor,
-    target
+  function buildGraphAxisPredicateChain(
+    anchor,
+    target,
+    axis,
+    allowText = false
   ) {
-    const steps = [];
+    if (
+      !(
+        anchor instanceof
+        Element
+      ) ||
+      !(
+        target instanceof
+        Element
+      ) ||
+      !axis
+    ) {
+      return null;
+    }
+
+    const lineage = [];
 
     let current =
       target;
 
     while (
       current &&
-      current !== ancestor
+      current.tagName !== "HTML" &&
+      current.tagName !== "BODY"
     ) {
-      steps.unshift(
-        buildXPathStep(
-          current
-        )
-      );
+      lineage.push(current);
 
       current =
         current.parentElement;
     }
 
-    return steps.length
-      ? `/${steps.join("/")}`
+    let bestResult =
+      null;
+
+    for (
+      const waypoint of
+      lineage
+    ) {
+      const waypointVariants =
+        getGraphScopedNodeVariants(
+          waypoint,
+          allowText
+        );
+
+      for (
+        const waypointVariant of
+        waypointVariants
+      ) {
+        const relativeXPath =
+          `${axis}::${waypointVariant.nodeTest}`;
+
+        if (
+          containsQuarantinedAttributeValue(
+            relativeXPath
+          )
+        ) {
+          continue;
+        }
+
+        if (
+          !matchesOnlyElementInScope(
+            anchor,
+            relativeXPath,
+            waypoint
+          )
+        ) {
+          continue;
+        }
+
+        const remainder =
+          waypoint === target
+            ? {
+                suffix:
+                  "",
+
+                score:
+                  0,
+
+                strategies:
+                  [],
+              }
+            : buildGraphPredicateChain(
+                waypoint,
+                target,
+                allowText
+              );
+
+        if (!remainder) {
+          continue;
+        }
+
+        const result = {
+          suffix:
+            `/${axis}::` +
+            `${waypointVariant.nodeTest}` +
+            remainder.suffix,
+
+          score:
+            waypointVariant.score +
+            remainder.score +
+            35,
+
+          strategies: [
+            `${axis}-axis`,
+            waypointVariant.strategy,
+            ...remainder.strategies,
+          ],
+        };
+
+        if (
+          containsNumericPosition(
+            result.suffix
+          ) ||
+          containsQuarantinedAttributeValue(
+            result.suffix
+          )
+        ) {
+          continue;
+        }
+
+        if (
+          !bestResult ||
+          result.score <
+            bestResult.score ||
+          (
+            result.score ===
+              bestResult.score &&
+            result.suffix.length <
+              bestResult.suffix.length
+          )
+        ) {
+          bestResult =
+            result;
+        }
+      }
+    }
+
+    return bestResult;
+  }
+
+  function getGraphRelationVariants(
+    candidate,
+    target,
+    allowText = false
+  ) {
+    const anchor =
+      candidate.element;
+
+    const variants = [];
+    const seen =
+      new Set();
+
+    const pushRelation = (
+      suffix,
+      score,
+      strategy
+    ) => {
+      const key =
+        `${suffix}\u0000${strategy}`;
+
+      if (
+        seen.has(key) ||
+        containsNumericPosition(
+          suffix
+        ) ||
+        containsQuarantinedAttributeValue(
+          suffix
+        )
+      ) {
+        return;
+      }
+
+      seen.add(key);
+
+      variants.push({
+        suffix,
+        score,
+        strategy,
+      });
+    };
+
+    if (anchor === target) {
+      pushRelation(
+        "",
+        0,
+        "anchor-is-target"
+      );
+
+      return variants;
+    }
+
+    if (anchor.contains(target)) {
+      const chain =
+        buildGraphPredicateChain(
+          anchor,
+          target,
+          allowText
+        );
+
+      if (chain?.suffix) {
+        pushRelation(
+          chain.suffix,
+          chain.score,
+          allowText
+            ? "predicate-chain-with-text-fallback"
+            : "attribute-predicate-chain"
+        );
+      }
+    }
+
+    if (target.contains(anchor)) {
+      const targetVariants =
+        getGraphScopedNodeVariants(
+          target,
+          allowText
+        );
+
+      for (
+        const targetVariant of
+        targetVariants
+      ) {
+        pushRelation(
+          `/ancestor::${targetVariant.nodeTest}`,
+          targetVariant.score + 12,
+          "predicate-ancestor-axis"
+        );
+      }
+    }
+
+    const position =
+      anchor.compareDocumentPosition(
+        target
+      );
+
+    const targetIsFollowing =
+      !!(
+        position &
+        Node
+          .DOCUMENT_POSITION_FOLLOWING
+      );
+
+    const targetIsPreceding =
+      !!(
+        position &
+        Node
+          .DOCUMENT_POSITION_PRECEDING
+      );
+
+    if (
+      anchor.parentElement &&
+      anchor.parentElement ===
+        target.parentElement
+    ) {
+      const siblingAxis =
+        targetIsFollowing
+          ? "following-sibling"
+          : "preceding-sibling";
+
+      const targetVariants =
+        getGraphScopedNodeVariants(
+          target,
+          allowText
+        );
+
+      for (
+        const targetVariant of
+        targetVariants
+      ) {
+        pushRelation(
+          `/${siblingAxis}::` +
+          `${targetVariant.nodeTest}`,
+          targetVariant.score + 14,
+          `${siblingAxis}-predicate`
+        );
+      }
+    }
+
+    if (
+      !anchor.contains(target) &&
+      !target.contains(anchor)
+    ) {
+      const axis =
+        targetIsFollowing
+          ? "following"
+          : targetIsPreceding
+            ? "preceding"
+            : "";
+
+      if (axis) {
+        const axisChain =
+          buildGraphAxisPredicateChain(
+            anchor,
+            target,
+            axis,
+            allowText
+          );
+
+        if (axisChain?.suffix) {
+          pushRelation(
+            axisChain.suffix,
+            axisChain.score,
+            `${axis}-predicate-chain`
+          );
+        }
+      }
+    }
+
+    return variants;
+  }
+
+  function compareGraphCandidatesByTraversal(
+    left,
+    right
+  ) {
+    const traversalComparison =
+      compareGraphTraversalPath(
+        left.traversalPath,
+        right.traversalPath
+      );
+
+    if (
+      traversalComparison !== 0
+    ) {
+      return traversalComparison;
+    }
+
+    if (
+      left.traversalOrder !==
+      right.traversalOrder
+    ) {
+      return (
+        left.traversalOrder -
+        right.traversalOrder
+      );
+    }
+
+    const leftScore =
+      left.graphCost * 12 +
+      left.stabilityPenalty;
+
+    const rightScore =
+      right.graphCost * 12 +
+      right.stabilityPenalty;
+
+    if (
+      leftScore !==
+      rightScore
+    ) {
+      return (
+        leftScore -
+        rightScore
+      );
+    }
+
+    return (
+      left.pathFromTarget.length -
+      right.pathFromTarget.length
+    );
+  }
+
+  function findBestGraphXPathForCandidates(
+    target,
+    candidates,
+    allowTextRelations = false
+  ) {
+    if (!candidates.size) {
+      return "";
+    }
+
+    const rankedCandidates =
+      Array.from(
+        candidates.values()
+      )
+        .filter(candidate => {
+          return !(
+            candidate.kind ===
+              "attribute" &&
+            isGraphAttributeValueQuarantined(
+              candidate.attributeValue
+            )
+          );
+        })
+        .sort(
+          compareGraphCandidatesByTraversal
+        )
+        .slice(
+          0,
+          GRAPH_XPATH_MAX_ANCHORS
+        );
+
+    const generated =
+      new Set();
+
+    let generatedCount = 0;
+    let bestResult = null;
+
+    outer:
+    for (
+      const candidate of
+      rankedCandidates
+    ) {
+      const anchorVariants =
+        getGraphAnchorVariants(
+          candidate
+        );
+
+      const relationVariants =
+        getGraphRelationVariants(
+          candidate,
+          target,
+          allowTextRelations
+        );
+
+      for (
+        const anchorVariant of
+        anchorVariants
+      ) {
+        for (
+          const relationVariant of
+          relationVariants
+        ) {
+          if (
+            generatedCount >=
+            GRAPH_XPATH_MAX_GENERATED
+          ) {
+            break outer;
+          }
+
+          const xpath =
+            anchorVariant.xpath +
+            relationVariant.suffix;
+
+          if (
+            generated.has(xpath) ||
+            !isAcceptableGraphXPath(
+              xpath
+            ) ||
+            containsNumericPosition(
+              xpath
+            ) ||
+            containsQuarantinedAttributeValue(
+              xpath
+            )
+          ) {
+            continue;
+          }
+
+          generated.add(xpath);
+          generatedCount += 1;
+
+          if (
+            !matchesOnlyElement(
+              xpath,
+              target
+            )
+          ) {
+            continue;
+          }
+
+          let score =
+            candidate.stabilityPenalty +
+            anchorVariant.score +
+            relationVariant.score +
+            xpath.length / 100;
+
+          /*
+           * Traversal ordering is already handled by candidate ranking.
+           * These scores choose the best expression inside the same
+           * traversal region.
+           */
+          if (
+            xpath.includes(
+              "/following::"
+            ) ||
+            xpath.includes(
+              "/preceding::"
+            )
+          ) {
+            score += 10;
+          }
+
+          if (
+            xpath.includes(
+              "contains("
+            )
+          ) {
+            score += 4;
+          }
+
+          if (
+            xpath.includes(
+              "normalize-space("
+            )
+          ) {
+            score += 8;
+          }
+
+          if (
+            !bestResult
+          ) {
+            bestResult = {
+              xpath,
+              score,
+              traversalPath:
+                candidate.traversalPath,
+              traversalOrder:
+                candidate.traversalOrder,
+            };
+
+            continue;
+          }
+
+          const traversalComparison =
+            compareGraphTraversalPath(
+              candidate.traversalPath,
+              bestResult.traversalPath
+            );
+
+          if (
+            traversalComparison < 0 ||
+            (
+              traversalComparison === 0 &&
+              candidate.traversalOrder <
+                bestResult.traversalOrder
+            ) ||
+            (
+              traversalComparison === 0 &&
+              candidate.traversalOrder ===
+                bestResult.traversalOrder &&
+              score <
+                bestResult.score
+            )
+          ) {
+            bestResult = {
+              xpath,
+              score,
+              traversalPath:
+                candidate.traversalPath,
+              traversalOrder:
+                candidate.traversalOrder,
+            };
+          }
+        }
+      }
+    }
+
+    return (
+      bestResult?.xpath ||
+      ""
+    );
+  }
+
+  function splitGraphCandidates(
+    candidates
+  ) {
+    const attributeCandidates =
+      new Map();
+
+    const textCandidates =
+      new Map();
+
+    for (
+      const [
+        key,
+        candidate,
+      ] of candidates
+    ) {
+      if (
+        candidate.kind ===
+        "attribute"
+      ) {
+        if (
+          isGraphAttributeValueQuarantined(
+            candidate.attributeValue
+          )
+        ) {
+          continue;
+        }
+
+        attributeCandidates.set(
+          key,
+          candidate
+        );
+      } else if (
+        candidate.kind === "text"
+      ) {
+        textCandidates.set(
+          key,
+          candidate
+        );
+      }
+    }
+
+    return {
+      attributeCandidates,
+      textCandidates,
+    };
+  }
+
+  function findBestGraphXPath(
+    target
+  ) {
+    const candidates =
+      collectGraphCandidates(
+        target
+      );
+
+    proveGraphCandidateUniqueness(
+      target,
+      candidates
+    );
+
+    if (!candidates.size) {
+      return "";
+    }
+
+    const {
+      attributeCandidates,
+      textCandidates,
+    } = splitGraphCandidates(
+      candidates
+    );
+
+    let xpath =
+      findBestGraphXPathForCandidates(
+        target,
+        attributeCandidates,
+        false
+      );
+
+    if (
+      xpath &&
+      !containsQuarantinedAttributeValue(
+        xpath
+      )
+    ) {
+      return xpath;
+    }
+
+    xpath =
+      findBestGraphXPathForCandidates(
+        target,
+        attributeCandidates,
+        true
+      );
+
+    if (
+      xpath &&
+      !containsQuarantinedAttributeValue(
+        xpath
+      )
+    ) {
+      return xpath;
+    }
+
+    xpath =
+      findBestGraphXPathForCandidates(
+        target,
+        textCandidates,
+        false
+      );
+
+    if (
+      xpath &&
+      !containsQuarantinedAttributeValue(
+        xpath
+      )
+    ) {
+      return xpath;
+    }
+
+    xpath =
+      findBestGraphXPathForCandidates(
+        target,
+        textCandidates,
+        true
+      );
+
+    return (
+      xpath &&
+      !containsQuarantinedAttributeValue(
+        xpath
+      )
+    )
+      ? xpath
       : "";
   }
 
-  function getElementAttributes(
-    el
+  function findBestNormalizeGraphXPath(
+    target
   ) {
-    if (!el) {
+    const candidates =
+      collectGraphCandidates(
+        target
+      );
+
+    proveGraphCandidateUniqueness(
+      target,
+      candidates
+    );
+
+    const {
+      textCandidates,
+    } = splitGraphCandidates(
+      candidates
+    );
+
+    let xpath =
+      findBestGraphXPathForCandidates(
+        target,
+        textCandidates,
+        false
+      );
+
+    if (
+      xpath &&
+      !containsQuarantinedAttributeValue(
+        xpath
+      ) &&
+      /normalize-space\s*\(/i.test(
+        xpath
+      )
+    ) {
+      return xpath;
+    }
+
+    xpath =
+      findBestGraphXPathForCandidates(
+        target,
+        textCandidates,
+        true
+      );
+
+    return (
+      xpath &&
+      !containsQuarantinedAttributeValue(
+        xpath
+      ) &&
+      /normalize-space\s*\(/i.test(
+        xpath
+      )
+    )
+      ? xpath
+      : "";
+  }
+
+  function getNormalClickXPath(
+    element
+  ) {
+    if (
+      !(
+        element instanceof
+        Element
+      )
+    ) {
+      return "";
+    }
+
+    const graphXPath =
+      findBestGraphXPath(
+        element
+      );
+
+    if (
+      graphXPath &&
+      !containsNumericPosition(
+        graphXPath
+      ) &&
+      !containsQuarantinedAttributeValue(
+        graphXPath
+      ) &&
+      matchesOnlyElement(
+        graphXPath,
+        element
+      )
+    ) {
+      return graphXPath;
+    }
+
+    return "";
+  }
+
+  function getSelector(
+    element
+  ) {
+    const target =
+      getXPathFriendlyTarget(
+        element
+      );
+
+    if (
+      !target ||
+      target.tagName === "HTML" ||
+      target.tagName === "BODY"
+    ) {
+      return "";
+    }
+
+    const xpath =
+      findBestGraphXPath(
+        target
+      );
+
+    if (
+      !xpath ||
+      containsNumericPosition(xpath) ||
+      containsQuarantinedAttributeValue(
+        xpath
+      ) ||
+      !matchesOnlyElement(
+        xpath,
+        target
+      )
+    ) {
+      return "";
+    }
+
+    return `xpath=${xpath}`;
+  }
+
+  function getIframeSelector(
+    element
+  ) {
+    if (!element) {
+      return "iframe";
+    }
+
+    const selector =
+      getSelector(element);
+
+    return selector || "iframe";
+  }
+
+  /*
+   * Positional XPath remains isolated to backup_xpath.
+   */
+  function getHardcodedBackupXPath(
+    element
+  ) {
+    if (
+      !(
+        element instanceof
+        Element
+      )
+    ) {
+      return "";
+    }
+
+    const doc =
+      element.ownerDocument ||
+      document;
+
+    const baseXPath =
+      `//${getXPathTag(
+        element
+      )}`;
+
+    let result;
+
+    try {
+      result =
+        doc.evaluate(
+          baseXPath,
+          doc,
+          null,
+          XPathResult
+            .ORDERED_NODE_SNAPSHOT_TYPE,
+          null
+        );
+    } catch {
+      return "";
+    }
+
+    for (
+      let index = 0;
+      index <
+        result.snapshotLength;
+      index += 1
+    ) {
+      if (
+        result.snapshotItem(index) ===
+        element
+      ) {
+        const backupXPath =
+          `(${baseXPath})` +
+          `[${index + 1}]`;
+
+        return matchesOnlyElement(
+          backupXPath,
+          element
+        )
+          ? backupXPath
+          : "";
+      }
+    }
+
+    return "";
+  }
+
+  function getElementAttributes(
+    element
+  ) {
+    if (!element) {
       return {};
     }
 
     const type =
-      el.getAttribute?.(
+      getNonQuarantinedAttributeValue(
+        element,
         "type"
-      ) ||
-      "";
+      );
+
+    const safeAttributes =
+      getNonQuarantinedAttributes(
+        element
+      );
+
+    const allAttributes =
+      Object.fromEntries(
+        safeAttributes.map(
+          attribute => [
+            attribute.name,
+            attribute.value,
+          ]
+        )
+      );
 
     return {
       tagName:
-        el.tagName
+        element.tagName
           ?.toLowerCase() ||
         null,
 
+      attributes:
+        Object.keys(
+          allAttributes
+        ).length
+          ? allAttributes
+          : null,
+
       id:
-        el.id ||
+        getNonQuarantinedAttributeValue(
+          element,
+          "id"
+        ) ||
         null,
 
       name:
-        el.getAttribute?.(
+        getNonQuarantinedAttributeValue(
+          element,
           "name"
         ) ||
         null,
@@ -2331,7 +4105,8 @@ function injectListeners() {
           "radio",
         ].includes(type)
           ? (
-              el.getAttribute?.(
+              getNonQuarantinedAttributeValue(
+                element,
                 "value"
               ) ||
               null
@@ -2340,66 +4115,76 @@ function injectListeners() {
 
       neighborText:
         getChoiceInputNeighborText(
-          el
+          element
         ) ||
         null,
 
       href:
-        el.getAttribute?.(
+        getNonQuarantinedAttributeValue(
+          element,
           "href"
         ) ||
         null,
 
       role:
-        el.getAttribute?.(
+        getNonQuarantinedAttributeValue(
+          element,
           "role"
         ) ||
         null,
 
       ariaLabel:
-        el.getAttribute?.(
+        getNonQuarantinedAttributeValue(
+          element,
           "aria-label"
         ) ||
         null,
 
       xTooltip:
-        el.getAttribute?.(
+        getNonQuarantinedAttributeValue(
+          element,
           "x-tooltip"
         ) ||
         null,
 
       wireClick:
-        el.getAttribute?.(
+        getNonQuarantinedAttributeValue(
+          element,
           "wire:click"
         ) ||
         null,
 
       testId:
-        el.getAttribute?.(
+        getNonQuarantinedAttributeValue(
+          element,
           "data-testid"
         ) ||
         null,
 
       dataTest:
-        el.getAttribute?.(
+        getNonQuarantinedAttributeValue(
+          element,
           "data-test"
         ) ||
         null,
 
       dataCy:
-        el.getAttribute?.(
+        getNonQuarantinedAttributeValue(
+          element,
           "data-cy"
         ) ||
         null,
 
       dataLabel:
-        el.getAttribute?.(
+        getNonQuarantinedAttributeValue(
+          element,
           "data-label"
         ) ||
         null,
 
       placeholder:
-        el.getAttribute?.(
+        getNonQuarantinedAttributeValue(
+          element,
           "placeholder"
         ) ||
         null,
@@ -2412,17 +4197,19 @@ function injectListeners() {
     const frameChain = [];
 
     try {
-      let win = window;
+      let currentWindow =
+        window;
 
       while (
-        win !== win.top
+        currentWindow !==
+        currentWindow.top
       ) {
-        const parent =
-          win.parent;
+        const parentWindow =
+          currentWindow.parent;
 
-        const iframeEl =
+        const iframeElement =
           Array.from(
-            parent.document
+            parentWindow.document
               .querySelectorAll(
                 "iframe"
               )
@@ -2430,7 +4217,7 @@ function injectListeners() {
             try {
               return (
                 frame.contentWindow ===
-                win
+                currentWindow
               );
             } catch {
               return false;
@@ -2438,14 +4225,15 @@ function injectListeners() {
           });
 
         frameChain.unshift(
-          iframeEl
+          iframeElement
             ? getIframeSelector(
-                iframeEl
+                iframeElement
               )
             : "iframe(unknown)"
         );
 
-        win = parent;
+        currentWindow =
+          parentWindow;
       }
     } catch {
       // Cross-origin frame boundary.
@@ -2460,8 +4248,7 @@ function injectListeners() {
 
         while (current) {
           const root =
-            current.getRootNode &&
-            current.getRootNode();
+            current.getRootNode?.();
 
           if (
             !root ||
@@ -2471,9 +4258,7 @@ function injectListeners() {
           }
 
           shadowHosts.unshift(
-            getSelector(
-              root.host
-            )
+            getSelector(root.host)
           );
 
           current =
@@ -2492,8 +4277,7 @@ function injectListeners() {
           frameChain,
 
           isIframe:
-            frameChain.length >
-            0,
+            frameChain.length > 0,
 
           shadowHosts:
             shadowHosts.filter(
@@ -2501,21 +4285,20 @@ function injectListeners() {
             ),
 
           isShadowDom:
-            shadowHosts.length >
-            0,
+            shadowHosts.length > 0,
         }
       );
 
-    delete (
-      enriched.elementHandle
-    );
+    delete enriched.elementHandle;
 
     return omitNullFields(
       enriched
     );
   }
 
-  function dispatch(data) {
+  function dispatch(
+    data
+  ) {
     const sanitized =
       prepareAction(data);
 
@@ -2574,11 +4357,9 @@ function injectListeners() {
       "message",
       event => {
         if (
-          event.source ===
-            window ||
+          event.source === window ||
           !event.data ||
-          !event.data
-            .__pwAction ||
+          !event.data.__pwAction ||
           typeof window
             .__captureAction !==
             "function"
@@ -2586,13 +4367,6 @@ function injectListeners() {
           return;
         }
 
-        /*
-         * Do not perform the consecutive-XPath check again here.
-         *
-         * The originating frame already reserved the XPath before forwarding
-         * the action. Checking it again would reject the same action during
-         * forwarding.
-         */
         window.__captureAction(
           event.data.data
         );
@@ -2606,355 +4380,6 @@ function injectListeners() {
   let pendingPointerClick =
     null;
 
-  const POINTER_CLICK_MAX_AGE_MS =
-    1500;
-
-  const NORMAL_CLICK_MAX_DEPTH =
-    5;
-
-  const PRIMARY_NORMALIZE_MAX_DEPTH =
-    10;
-
-  function getPriorityXPathCandidates(
-    el
-  ) {
-    const tag =
-      getXPathTag(el);
-
-    const candidates = [];
-
-    const priorityAttrs = [
-      "id",
-      "data-testid",
-      "data-test",
-      "data-qa",
-      "data-cy",
-      "aria-label",
-      "aria-labelledby",
-      "name",
-      "placeholder",
-      "title",
-      "href",
-      "role",
-      "type",
-    ];
-
-    for (
-      const attr of
-      priorityAttrs
-    ) {
-      const value =
-        el.getAttribute?.(
-          attr
-        );
-
-      if (value) {
-        candidates.push(
-          `//${tag}` +
-          `[@${attr}=` +
-          `${xpathLiteral(
-            value
-          )}]`
-        );
-      }
-    }
-
-    const text =
-      (
-        el.textContent ||
-        ""
-      )
-        .trim()
-        .replace(
-          /\s+/g,
-          " "
-        );
-
-    if (
-      text &&
-      text.length <= 80
-    ) {
-      candidates.push(
-        `//${tag}` +
-        `[normalize-space(.)=` +
-        `${xpathLiteral(
-          text
-        )}]`
-      );
-    }
-
-    return Array.from(
-      new Set(
-        candidates
-      )
-    );
-  }
-
-  function getNormalClickXPath(
-    el
-  ) {
-    if (
-      !(
-        el instanceof
-        Element
-      )
-    ) {
-      return "";
-    }
-
-    let anchor = el;
-
-    for (
-      let depth = 0;
-      anchor &&
-      anchor.nodeType ===
-        Node.ELEMENT_NODE &&
-      depth <=
-        NORMAL_CLICK_MAX_DEPTH;
-      depth += 1
-    ) {
-      if (
-        anchor.tagName ===
-          "HTML" ||
-        anchor.tagName ===
-          "BODY"
-      ) {
-        break;
-      }
-
-      const anchorCandidates =
-        getPriorityXPathCandidates(
-          anchor
-        );
-
-      for (
-        const anchorXPath of
-        anchorCandidates
-      ) {
-        if (
-          !matchesOnlyElement(
-            anchorXPath,
-            anchor
-          )
-        ) {
-          continue;
-        }
-
-        if (
-          anchor === el
-        ) {
-          return anchorXPath;
-        }
-
-        const childPath =
-          getIndexedPathFromAncestor(
-            anchor,
-            el
-          );
-
-        if (!childPath) {
-          continue;
-        }
-
-        const finalXPath =
-          `${anchorXPath}${childPath}`;
-
-        if (
-          matchesOnlyElement(
-            finalXPath,
-            el
-          )
-        ) {
-          return finalXPath;
-        }
-      }
-
-      anchor =
-        anchor.parentElement;
-    }
-
-    const fallbackParts = [];
-
-    let current = el;
-
-    while (
-      current &&
-      current.nodeType ===
-        Node.ELEMENT_NODE
-    ) {
-      fallbackParts.unshift(
-        getIndexedXPathSegment(
-          current
-        )
-      );
-
-      current =
-        current.parentElement;
-    }
-
-    const fallbackXPath =
-      `/${fallbackParts.join(
-        "/"
-      )}`;
-
-    return matchesOnlyElement(
-      fallbackXPath,
-      el
-    )
-      ? fallbackXPath
-      : "";
-  }
-
-  function getIndexedPathFromAncestor(
-    ancestor,
-    el
-  ) {
-    const parts = [];
-
-    let current = el;
-
-    while (
-      current &&
-      current !== ancestor
-    ) {
-      parts.unshift(
-        getIndexedXPathSegment(
-          current
-        )
-      );
-
-      current =
-        current.parentElement;
-    }
-
-    if (
-      current !== ancestor ||
-      !parts.length
-    ) {
-      return "";
-    }
-
-    return (
-      `/${parts.join("/")}`
-    );
-  }
-
-  function getIndexedXPathSegment(
-    el
-  ) {
-    const tag =
-      getXPathTag(el);
-
-    if (!el.parentElement) {
-      return `${tag}[1]`;
-    }
-
-    const siblings =
-      Array.from(
-        el.parentElement
-          .children
-      ).filter(child => {
-        return (
-          child.localName ===
-            el.localName &&
-          child.namespaceURI ===
-            el.namespaceURI
-        );
-      });
-
-    return (
-      `${tag}[` +
-      `${
-        siblings.indexOf(
-          el
-        ) + 1
-      }]`
-    );
-  }
-
-  function matchesOnlyElement(
-    xpath,
-    targetEl
-  ) {
-    try {
-      const doc =
-        targetEl
-          ?.ownerDocument ||
-        document;
-
-      const result =
-        doc.evaluate(
-          xpath,
-          doc,
-          null,
-          XPathResult
-            .ORDERED_NODE_SNAPSHOT_TYPE,
-          null
-        );
-
-      return (
-        result.snapshotLength ===
-          1 &&
-        result.snapshotItem(
-          0
-        ) === targetEl
-      );
-    } catch {
-      return false;
-    }
-  }
-
-  function getXPathTag(el) {
-    const tag =
-      el.localName ||
-      el.tagName
-        .toLowerCase();
-
-    return (
-      el.namespaceURI ===
-      "http://www.w3.org/2000/svg"
-    )
-      ? (
-          `*[local-name()=` +
-          `${xpathLiteral(
-            tag
-          )}]`
-        )
-      : tag;
-  }
-
-  function xpathLiteral(
-    value
-  ) {
-    value =
-      String(value);
-
-    if (
-      !value.includes("'")
-    ) {
-      return `'${value}'`;
-    }
-
-    if (
-      !value.includes('"')
-    ) {
-      return `"${value}"`;
-    }
-
-    return (
-      "concat(" +
-      value
-        .split("'")
-        .map(part => {
-          return `'${part}'`;
-        })
-        .join(
-          ', "\'", '
-        ) +
-      ")"
-    );
-  }
-
   function getFrameInfo() {
     return {
       frameUrl:
@@ -2967,222 +4392,76 @@ function injectListeners() {
   }
 
   function getElementFingerprint(
-    el
+    element
   ) {
     if (
-      !el ||
-      !el.tagName
+      !element ||
+      !element.tagName
     ) {
       return null;
     }
 
+    const safeAttributes =
+      getNonQuarantinedAttributes(
+        element
+      );
+
     return {
       tag:
-        el.localName ||
-        el.tagName
+        element.localName ||
+        element.tagName
           .toLowerCase(),
 
       text:
-        (
-          el.textContent ||
-          ""
-        )
-          .trim()
-          .replace(
-            /\s+/g,
-            " "
+        getGraphNormalizedText(
+          element
+        ).slice(0, 150),
+
+      attributes:
+        Object.fromEntries(
+          safeAttributes.map(
+            attribute => [
+              attribute.name,
+              attribute.value,
+            ]
           )
-          .slice(
-            0,
-            150
-          ),
-
-      ariaLabel:
-        el.getAttribute(
-          "aria-label"
-        ),
-
-      role:
-        el.getAttribute(
-          "role"
-        ),
-
-      title:
-        el.getAttribute(
-          "title"
-        ),
-
-      type:
-        el.getAttribute(
-          "type"
-        ),
-
-      name:
-        el.getAttribute(
-          "name"
         ),
     };
   }
 
   function getPrimaryNormalizeXPath(
-    el
+    element
   ) {
     if (
       !(
-        el instanceof
+        element instanceof
         Element
       )
     ) {
       return "";
     }
 
-    let anchor = el;
+    const xpath =
+      findBestNormalizeGraphXPath(
+        element
+      );
 
-    for (
-      let depth = 0;
-      anchor &&
-      anchor.nodeType ===
-        Node.ELEMENT_NODE &&
-      depth <
-        PRIMARY_NORMALIZE_MAX_DEPTH;
-      depth += 1
-    ) {
-      if (
-        anchor.tagName ===
-          "HTML" ||
-        anchor.tagName ===
-          "BODY"
-      ) {
-        break;
-      }
-
-      const text =
-        (
-          anchor.textContent ||
-          ""
-        )
-          .trim()
-          .replace(
-            /\s+/g,
-            " "
-          );
-
-      if (
-        text &&
-        text.length <= 80
-      ) {
-        const anchorXPath =
-          `//${getXPathTag(
-            anchor
-          )}` +
-          `[normalize-space(.)=` +
-          `${xpathLiteral(
-            text
-          )}]`;
-
-        if (
-          matchesOnlyElement(
-            anchorXPath,
-            anchor
-          )
-        ) {
-          if (
-            anchor === el
-          ) {
-            return anchorXPath;
-          }
-
-          const childPath =
-            getIndexedPathFromAncestor(
-              anchor,
-              el
-            );
-
-          if (childPath) {
-            const finalXPath =
-              `${anchorXPath}${childPath}`;
-
-            if (
-              matchesOnlyElement(
-                finalXPath,
-                el
-              )
-            ) {
-              return finalXPath;
-            }
-          }
-        }
-      }
-
-      anchor =
-        anchor.parentElement;
-    }
-
-    return "";
-  }
-
-  function getHardcodedBackupXPath(
-    el
-  ) {
-    if (
-      !(
-        el instanceof
-        Element
+    return (
+      xpath &&
+      !containsNumericPosition(xpath) &&
+      !containsQuarantinedAttributeValue(
+        xpath
+      ) &&
+      /normalize-space\s*\(/i.test(
+        xpath
+      ) &&
+      matchesOnlyElement(
+        xpath,
+        element
       )
-    ) {
-      return "";
-    }
-
-    const doc =
-      el.ownerDocument ||
-      document;
-
-    const baseXPath =
-      `//${getXPathTag(
-        el
-      )}`;
-
-    let result;
-
-    try {
-      result =
-        doc.evaluate(
-          baseXPath,
-          doc,
-          null,
-          XPathResult
-            .ORDERED_NODE_SNAPSHOT_TYPE,
-          null
-        );
-    } catch {
-      return "";
-    }
-
-    for (
-      let index = 0;
-      index <
-        result.snapshotLength;
-      index += 1
-    ) {
-      if (
-        result.snapshotItem(
-          index
-        ) === el
-      ) {
-        const backupXPath =
-          `(${baseXPath})` +
-          `[${index + 1}]`;
-
-        return matchesOnlyElement(
-          backupXPath,
-          el
-        )
-          ? backupXPath
-          : "";
-      }
-    }
-
-    return "";
+    )
+      ? xpath
+      : "";
   }
 
   function getInnermostActionableTarget(
@@ -3190,8 +4469,7 @@ function injectListeners() {
     fallbackElement = null
   ) {
     const eventPath =
-      typeof event
-        .composedPath ===
+      typeof event.composedPath ===
       "function"
         ? event.composedPath()
         : [];
@@ -3237,9 +4515,8 @@ function injectListeners() {
     }
 
     if (
-      fallbackElement
-        instanceof
-        Element
+      fallbackElement instanceof
+      Element
     ) {
       const friendlyFallback =
         getXPathFriendlyTarget(
@@ -3261,26 +4538,26 @@ function injectListeners() {
 
   function createValidatedClickSnapshot(
     event,
-    rawEl,
+    rawElement,
     inputMethod
   ) {
-    const el =
+    const element =
       getInnermostActionableTarget(
         event,
-        rawEl
+        rawElement
       );
 
     if (
-      !el ||
-      !el.tagName ||
-      !el.isConnected
+      !element ||
+      !element.tagName ||
+      !element.isConnected
     ) {
       return null;
     }
 
     const tag =
-      el.localName ||
-      el.tagName
+      element.localName ||
+      element.tagName
         .toLowerCase();
 
     if (
@@ -3292,13 +4569,13 @@ function injectListeners() {
 
     const normalXPath =
       getNormalClickXPath(
-        el
+        element
       );
 
     if (!normalXPath) {
       console.warn(
-        "Could not generate normal XPath selector before click:",
-        el
+        "Could not generate non-positional, non-quarantined graph XPath before click:",
+        element
       );
 
       return null;
@@ -3306,13 +4583,13 @@ function injectListeners() {
 
     const backupXPath =
       getHardcodedBackupXPath(
-        el
+        element
       );
 
     if (!backupXPath) {
       console.warn(
         "Could not generate backup_xpath before click:",
-        el
+        element
       );
 
       return null;
@@ -3320,22 +4597,32 @@ function injectListeners() {
 
     const primaryXPath =
       getPrimaryNormalizeXPath(
-        el
+        element
       ) ||
       backupXPath;
 
     if (
+      containsQuarantinedAttributeValue(
+        normalXPath
+      ) ||
+      (
+        primaryXPath !==
+          backupXPath &&
+        containsQuarantinedAttributeValue(
+          primaryXPath
+        )
+      ) ||
       !matchesOnlyElement(
         normalXPath,
-        el
+        element
       ) ||
       !matchesOnlyElement(
         primaryXPath,
-        el
+        element
       ) ||
       !matchesOnlyElement(
         backupXPath,
-        el
+        element
       )
     ) {
       console.warn(
@@ -3344,8 +4631,7 @@ function injectListeners() {
           normalXPath,
           primaryXPath,
           backupXPath,
-          element:
-            el,
+          element,
         }
       );
 
@@ -3353,21 +4639,14 @@ function injectListeners() {
     }
 
     const text =
-      el.textContent
-        ?.trim()
-        ?.replace(
-          /\s+/g,
-          " "
-        )
-        .slice(
-          0,
-          100
-        ) ||
+      getGraphNormalizedText(
+        element
+      ).slice(0, 100) ||
       null;
 
     return {
       target:
-        el,
+        element,
 
       inputMethod,
 
@@ -3384,12 +4663,12 @@ function injectListeners() {
 
       element:
         getElementAttributes(
-          el
+          element
         ),
 
       fingerprint:
         getElementFingerprint(
-          el
+          element
         ),
     };
   }
@@ -3400,17 +4679,31 @@ function injectListeners() {
     if (
       !snapshot ||
       !(
-        snapshot.target
-          instanceof
-          Element
+        snapshot.target instanceof
+        Element
       ) ||
-      !snapshot.target
-        .isConnected
+      !snapshot.target.isConnected
     ) {
       return false;
     }
 
+    const primaryUsesBackup =
+      snapshot.primaryXPath ===
+      snapshot.backupXPath;
+
     return (
+      !containsNumericPosition(
+        snapshot.normalXPath
+      ) &&
+      !containsQuarantinedAttributeValue(
+        snapshot.normalXPath
+      ) &&
+      (
+        primaryUsesBackup ||
+        !containsQuarantinedAttributeValue(
+          snapshot.primaryXPath
+        )
+      ) &&
       matchesOnlyElement(
         snapshot.normalXPath,
         snapshot.target
@@ -3426,48 +4719,19 @@ function injectListeners() {
     );
   }
 
-  /*
-   * This is the consecutive-click comparison key.
-   *
-   * When an HTML id exists:
-   *
-   *   xpath=//button[@id='continue']
-   *
-   * Otherwise:
-   *
-   *   xpath=<normal generated XPath>
-   */
   function createClickXPathKey(
     snapshot
   ) {
-    const target =
-      snapshot?.target;
-
-    if (
-      !target ||
-      !snapshot?.normalXPath
-    ) {
+    if (!snapshot?.normalXPath) {
       return "";
     }
 
-    const elementId =
-      target.getAttribute?.(
-        "id"
-      );
-
-    if (elementId) {
-      const tag =
-        getXPathTag(
-          target
-        );
-
-      return (
-        `xpath=//${tag}` +
-        `[@id=` +
-        `${xpathLiteral(
-          elementId
-        )}]`
-      );
+    if (
+      containsQuarantinedAttributeValue(
+        snapshot.normalXPath
+      )
+    ) {
+      return "";
     }
 
     return (
@@ -3480,8 +4744,7 @@ function injectListeners() {
     event => {
       try {
         if (
-          event.isTrusted ===
-            false ||
+          event.isTrusted === false ||
           event.button !== 0 ||
           !isRealUserFrame()
         ) {
@@ -3491,16 +4754,15 @@ function injectListeners() {
           return;
         }
 
-        const rawEl =
+        const rawElement =
           event.composedPath
-            ? event
-                .composedPath()[0]
+            ? event.composedPath()[0]
             : event.target;
 
         if (
-          !rawEl ||
-          !rawEl.tagName ||
-          rawEl.tagName
+          !rawElement ||
+          !rawElement.tagName ||
+          rawElement.tagName
             .toLowerCase() ===
             "x-pw-glass"
         ) {
@@ -3513,7 +4775,7 @@ function injectListeners() {
         const snapshot =
           createValidatedClickSnapshot(
             event,
-            rawEl,
+            rawElement,
             "pointer"
           );
 
@@ -3559,13 +4821,11 @@ function injectListeners() {
   document.addEventListener(
     "click",
     event => {
-      let xpathKey =
-        "";
+      let xpathKey = "";
 
       try {
         if (
-          event.isTrusted ===
-            false ||
+          event.isTrusted === false ||
           !isRealUserFrame()
         ) {
           return;
@@ -3574,9 +4834,7 @@ function injectListeners() {
         let clickSnapshot =
           null;
 
-        if (
-          pendingPointerClick
-        ) {
+        if (pendingPointerClick) {
           const pointerClick =
             pendingPointerClick;
 
@@ -3593,24 +4851,22 @@ function injectListeners() {
           if (
             Math.abs(
               eventTimeStamp -
-              pointerClick
-                .timeStamp
+              pointerClick.timeStamp
             ) >
             POINTER_CLICK_MAX_AGE_MS
           ) {
             return;
           }
 
-          const clickRawEl =
+          const rawElement =
             event.composedPath
-              ? event
-                  .composedPath()[0]
+              ? event.composedPath()[0]
               : event.target;
 
           const clickTarget =
             getInnermostActionableTarget(
               event,
-              clickRawEl
+              rawElement
             );
 
           if (
@@ -3621,8 +4877,7 @@ function injectListeners() {
               "Pointerdown and click resolved to different elements:",
               {
                 pointerdownTarget:
-                  pointerClick
-                    .target,
+                  pointerClick.target,
 
                 clickTarget,
               }
@@ -3636,16 +4891,15 @@ function injectListeners() {
         } else if (
           event.detail === 0
         ) {
-          const rawEl =
+          const rawElement =
             event.composedPath
-              ? event
-                  .composedPath()[0]
+              ? event.composedPath()[0]
               : event.target;
 
           if (
-            !rawEl ||
-            !rawEl.tagName ||
-            rawEl.tagName
+            !rawElement ||
+            !rawElement.tagName ||
+            rawElement.tagName
               .toLowerCase() ===
               "x-pw-glass"
           ) {
@@ -3655,7 +4909,7 @@ function injectListeners() {
           clickSnapshot =
             createValidatedClickSnapshot(
               event,
-              rawEl,
+              rawElement,
               "keyboard"
             );
         } else {
@@ -3675,8 +4929,7 @@ function injectListeners() {
             "Stored pre-click XPath values no longer point to the exact clicked element:",
             {
               selector:
-                clickSnapshot
-                  .selector,
+                clickSnapshot.selector,
 
               primaryXPath:
                 clickSnapshot
@@ -3687,17 +4940,13 @@ function injectListeners() {
                   .backupXPath,
 
               element:
-                clickSnapshot
-                  .target,
+                clickSnapshot.target,
             }
           );
 
           return;
         }
 
-        /*
-         * Build the XPath used for consecutive duplicate comparison.
-         */
         xpathKey =
           createClickXPathKey(
             clickSnapshot
@@ -3705,16 +4954,12 @@ function injectListeners() {
 
         if (!xpathKey) {
           console.warn(
-            "[click-recorder] Could not create XPath dedupe key."
+            "[click-recorder] Could not create non-quarantined XPath dedupe key."
           );
 
           return;
         }
 
-        /*
-         * Reject only when this XPath is identical to the immediately
-         * previous click XPath.
-         */
         if (
           !reserveClickXPath(
             xpathKey
@@ -3731,40 +4976,33 @@ function injectListeners() {
           return;
         }
 
-        const el =
+        const element =
           clickSnapshot.target;
 
         const selector =
           clickSnapshot.selector;
 
         const primaryXPath =
-          clickSnapshot
-            .primaryXPath;
+          clickSnapshot.primaryXPath;
 
         const backupXPath =
-          clickSnapshot
-            .backupXPath;
+          clickSnapshot.backupXPath;
 
         const text =
           clickSnapshot.text;
 
-        const element =
+        const elementMetadata =
           clickSnapshot.element;
 
         const fingerprint =
-          clickSnapshot
-            .fingerprint;
+          clickSnapshot.fingerprint;
 
         const inputMethod =
-          clickSnapshot
-            .inputMethod;
+          clickSnapshot.inputMethod;
 
         const sequence =
           ++actionSequence;
 
-        /*
-         * Retain the XPath-based click ID contract.
-         */
         const clickId =
           xpathKey;
 
@@ -3788,11 +5026,12 @@ function injectListeners() {
               backupXPath,
 
             elementHandle:
-              el,
+              element,
 
             text,
 
-            element,
+            element:
+              elementMetadata,
           });
 
         const job = {
@@ -3826,7 +5065,8 @@ function injectListeners() {
 
           text,
 
-          element,
+          element:
+            elementMetadata,
 
           capturedAction,
 
@@ -3881,14 +5121,9 @@ function injectListeners() {
           "function"
         ) {
           window
-            .__captureClickAction(
-              job
-            )
+            .__captureClickAction(job)
             .then(result => {
-              if (
-                result
-                  ?.duplicate
-              ) {
+              if (result?.duplicate) {
                 markClickXPathSaved(
                   xpathKey
                 );
@@ -3909,9 +5144,6 @@ function injectListeners() {
                 result.accepted ===
                   false
               ) {
-                /*
-                 * The write failed, so allow this XPath to be tried again.
-                 */
                 releaseClickXPath(
                   xpathKey
                 );
@@ -3942,9 +5174,7 @@ function injectListeners() {
           return;
         }
 
-        dispatch(
-          capturedAction
-        )
+        dispatch(capturedAction)
           .then(result => {
             if (
               result &&
@@ -3996,23 +5226,20 @@ function injectListeners() {
   document.addEventListener(
     "input",
     event => {
-      clearTimeout(
-        inputTimer
-      );
+      clearTimeout(inputTimer);
 
-      const el =
+      const element =
         event.composedPath
-          ? event
-              .composedPath()[0]
+          ? event.composedPath()[0]
           : event.target;
 
       if (
-        !el ||
+        !element ||
         ![
           "INPUT",
           "TEXTAREA",
         ].includes(
-          el.tagName
+          element.tagName
         ) ||
         !isRealUserFrame()
       ) {
@@ -4023,7 +5250,7 @@ function injectListeners() {
         setTimeout(
           () => {
             const selector =
-              getSelector(el);
+              getSelector(element);
 
             if (!selector) {
               return;
@@ -4036,18 +5263,18 @@ function injectListeners() {
               selector,
 
               elementHandle:
-                el,
+                element,
 
               value:
-                el.value,
+                element.value,
 
               inputType:
-                el.type ||
+                element.type ||
                 "text",
 
               element:
                 getElementAttributes(
-                  el
+                  element
                 ),
             });
           },
@@ -4060,28 +5287,27 @@ function injectListeners() {
   document.addEventListener(
     "change",
     event => {
-      const el =
+      const element =
         event.composedPath
-          ? event
-              .composedPath()[0]
+          ? event.composedPath()[0]
           : event.target;
 
       if (
-        !el ||
+        !element ||
         !isRealUserFrame()
       ) {
         return;
       }
 
       const selector =
-        getSelector(el);
+        getSelector(element);
 
       if (!selector) {
         return;
       }
 
       if (
-        el.tagName ===
+        element.tagName ===
         "SELECT"
       ) {
         dispatch({
@@ -4091,55 +5317,55 @@ function injectListeners() {
           selector,
 
           elementHandle:
-            el,
+            element,
 
           value:
-            el.value,
+            element.value,
 
           label:
-            el.options[
-              el.selectedIndex
+            element.options[
+              element.selectedIndex
             ]?.text ||
             null,
 
           element:
             getElementAttributes(
-              el
+              element
             ),
         });
       }
 
       if (
-        el.type ===
+        element.type ===
           "checkbox" ||
-        el.type ===
+        element.type ===
           "radio"
       ) {
         dispatch({
           action:
-            el.type,
+            element.type,
 
           selector,
 
           elementHandle:
-            el,
+            element,
 
           checked:
-            el.checked,
+            element.checked,
 
           value:
-            el.value ||
+            element.value ||
             null,
 
           element:
             getElementAttributes(
-              el
+              element
             ),
         });
       }
 
       if (
-        el.type ===
+        element.type ===
         "file"
       ) {
         dispatch({
@@ -4149,21 +5375,21 @@ function injectListeners() {
           selector,
 
           elementHandle:
-            el,
+            element,
 
           fileCount:
-            el.files.length,
+            element.files.length,
 
           fileNames:
             Array.from(
-              el.files
+              element.files
             ).map(file => {
               return file.name;
             }),
 
           element:
             getElementAttributes(
-              el
+              element
             ),
         });
       }
@@ -4175,9 +5401,7 @@ function injectListeners() {
     "load",
     () => {
       try {
-        if (
-          !isRealUserFrame()
-        ) {
+        if (!isRealUserFrame()) {
           return;
         }
 
@@ -4193,7 +5417,7 @@ function injectListeners() {
             null,
         });
       } catch {
-        // Ignore load capture errors.
+        // Ignore load capture failures.
       }
     }
   );
@@ -4201,16 +5425,12 @@ function injectListeners() {
   window.addEventListener(
     "scroll",
     () => {
-      clearTimeout(
-        scrollTimer
-      );
+      clearTimeout(scrollTimer);
 
       scrollTimer =
         setTimeout(
           () => {
-            if (
-              !isRealUserFrame()
-            ) {
+            if (!isRealUserFrame()) {
               return;
             }
 
@@ -4246,20 +5466,19 @@ function injectListeners() {
   document.addEventListener(
     "focusin",
     event => {
-      const el =
+      const element =
         event.composedPath
-          ? event
-              .composedPath()[0]
+          ? event.composedPath()[0]
           : event.target;
 
       if (
-        !el ||
+        !element ||
         ![
           "INPUT",
           "TEXTAREA",
           "SELECT",
         ].includes(
-          el.tagName
+          element.tagName
         ) ||
         !isRealUserFrame()
       ) {
@@ -4267,7 +5486,7 @@ function injectListeners() {
       }
 
       const selector =
-        getSelector(el);
+        getSelector(element);
 
       if (!selector) {
         return;
@@ -4280,11 +5499,11 @@ function injectListeners() {
         selector,
 
         elementHandle:
-          el,
+          element,
 
         element:
           getElementAttributes(
-            el
+            element
           ),
       });
     },
