@@ -41,5 +41,7 @@
   "otp": "",
   "nmfcNumber0": "123",
   "url_1": "https://demoqa.com/",
-  "carrierNotesOptional": "whatever"
+  "carrierNotesOptional": "whatever",
+  "xpathInputNameTypeAndSearch": "Test CLient JG",
+  "xpathInputNameTypeAndPassword": "Welcome@123321"
 }

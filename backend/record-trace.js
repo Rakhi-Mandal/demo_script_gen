@@ -447,16 +447,6 @@ function normalizeXPath(
 
 /**
  * Click selectors must always be XPath selectors.
- *
- * The selector may be generated from:
- *
- * - any locally discovered unique attribute;
- * - starts-with() or contains();
- * - normalize-space(.) as a lower-priority fallback;
- * - ancestor/descendant relationships;
- * - following-sibling:: or preceding-sibling::;
- * - following:: or preceding::;
- * - an indexed structural fallback.
  */
 function normalizeClickSelector(
     value
@@ -506,9 +496,144 @@ function normalizeClickSelector(
     return "";
 }
 
+/**
+ * Normalizes the ID assigned to one physical click gesture.
+ */
+function normalizeGestureId(
+    value
+) {
+    if (
+        typeof value !==
+        "string"
+    ) {
+        return "";
+    }
+
+    const normalized =
+        value.trim();
+
+    if (
+        !normalized ||
+        normalized.length > 1000
+    ) {
+        return "";
+    }
+
+    return normalized;
+}
+
+/**
+ * Gets the physical-click gesture ID supplied by listeners.js.
+ *
+ * New listeners send:
+ *
+ *     job.gestureId
+ *
+ * and also use the same value as:
+ *
+ *     job.clickId
+ *
+ * clickId is accepted only when it clearly uses the pointer/keyboard gesture
+ * format, preventing an older XPath-based clickId from being mistaken for a
+ * gesture ID.
+ */
+function getClickGestureId(
+    job
+) {
+    const directCandidates = [
+        job?.gestureId,
+
+        job?.clickEvent
+            ?.gestureId,
+
+        job?.capturedAction
+            ?.gestureId
+    ];
+
+    for (
+        const candidate of
+        directCandidates
+    ) {
+        const gestureId =
+            normalizeGestureId(
+                candidate
+            );
+
+        if (gestureId) {
+            return gestureId;
+        }
+    }
+
+    const compatibilityCandidates = [
+        job?.clickId,
+
+        job?.capturedAction
+            ?.clickId
+    ];
+
+    for (
+        const candidate of
+        compatibilityCandidates
+    ) {
+        const gestureId =
+            normalizeGestureId(
+                candidate
+            );
+
+        if (
+            /^(pointer|keyboard):/i.test(
+                gestureId
+            )
+        ) {
+            return gestureId;
+        }
+    }
+
+    return "";
+}
+
+/**
+ * Defensive actions-array lookup.
+ *
+ * The in-memory Set used later is the fast path. This lookup ensures the
+ * actions collection itself remains authoritative if the Set ever becomes
+ * out of sync.
+ */
+function actionsContainClickGesture(
+    gestureId
+) {
+    const normalizedGestureId =
+        normalizeGestureId(
+            gestureId
+        );
+
+    if (!normalizedGestureId) {
+        return false;
+    }
+
+    return actions.some(
+        action => {
+            return (
+                action?.action ===
+                    "click" &&
+                normalizeGestureId(
+                    action.gestureId
+                ) ===
+                    normalizedGestureId
+            );
+        }
+    );
+}
+
 function removeInternalClickFields(
     action
 ) {
+    /*
+     * gestureId intentionally remains in final output.
+     *
+     * It identifies the physical pointerdown/click gesture and allows the
+     * actions collection to prove that the gesture has already been used.
+     */
     delete action.clickId;
     delete action.xpathKey;
     delete action.sequence;
@@ -528,6 +653,7 @@ function removeInternalClickFields(
     /*
      * Final click output contains:
      *
+     * gestureId
      * selector
      * primary_xpath
      * backup_xpath
@@ -551,6 +677,21 @@ function removeInternalClickFields(
 function buildAcceptedClickAction(
     job
 ) {
+    const gestureId =
+        getClickGestureId(
+            job
+        );
+
+    if (!gestureId) {
+        return {
+            accepted:
+                false,
+
+            reason:
+                "Click contains no valid physical gestureId"
+        };
+    }
+
     const capturedAction =
         (
             job?.capturedAction &&
@@ -675,6 +816,11 @@ function buildAcceptedClickAction(
             action:
                 "click",
 
+            /*
+             * Store the gesture ID in the final actions collection.
+             */
+            gestureId,
+
             selector,
 
             primary_xpath:
@@ -689,6 +835,8 @@ function buildAcceptedClickAction(
             true,
 
         action,
+
+        gestureId,
 
         selector:
             action.selector,
@@ -775,10 +923,8 @@ function buildActionKey(
 /**
  * Returns the canonical XPath used for consecutive-click comparison.
  *
- * The accepted selector is authoritative because it is the exact
- * graph-generated selector persisted in the final action.
- *
- * xpathKey and clickId are compatibility fallbacks only.
+ * clickId is no longer considered an XPath fallback because current
+ * listeners.js uses clickId for the physical gesture ID.
  */
 function getClickXPathComparisonValue(
     job,
@@ -788,13 +934,9 @@ function getClickXPathComparisonValue(
         built?.selector,
 
         job?.xpathKey,
-        job?.clickId,
 
         job?.capturedAction
             ?.xpathKey,
-
-        job?.capturedAction
-            ?.clickId,
 
         job?.selector,
 
@@ -879,18 +1021,63 @@ function getClickXPathComparisonValue(
         null;
 
     /*
-     * Only the immediately previous accepted click XPath is retained.
+     * Fast in-memory lookup of physical click gestures already committed.
      *
-     * A -> A
+     * The actions array is also checked as a defensive source of truth.
+     */
+    const acceptedClickGestureIds =
+        new Set();
+
+    /*
+     * Existing consecutive-selector suppression is retained.
      *
-     * The second A is rejected.
-     *
-     * A -> B -> A
-     *
-     * All three are accepted.
+     * Physical-gesture deduplication now runs first, so two different
+     * selectors emitted for the same pointerdown cannot both be committed.
      */
     let lastAcceptedClickXPath =
         "";
+
+    function hasAcceptedClickGesture(
+        gestureId
+    ) {
+        const normalizedGestureId =
+            normalizeGestureId(
+                gestureId
+            );
+
+        if (!normalizedGestureId) {
+            return false;
+        }
+
+        return (
+            acceptedClickGestureIds
+                .has(
+                    normalizedGestureId
+                ) ||
+            actionsContainClickGesture(
+                normalizedGestureId
+            )
+        );
+    }
+
+    function registerAcceptedClickGesture(
+        gestureId
+    ) {
+        const normalizedGestureId =
+            normalizeGestureId(
+                gestureId
+            );
+
+        if (!normalizedGestureId) {
+            return false;
+        }
+
+        acceptedClickGestureIds.add(
+            normalizedGestureId
+        );
+
+        return true;
+    }
 
     function pushAcceptedAction(
         action
@@ -916,6 +1103,30 @@ function getClickXPathComparisonValue(
                 .selector
         ) {
             return false;
+        }
+
+        /*
+         * Final defensive physical-gesture check immediately before the
+         * action enters the actions array.
+         */
+        if (
+            cleanedAction.action ===
+            "click"
+        ) {
+            const gestureId =
+                normalizeGestureId(
+                    cleanedAction
+                        .gestureId
+                );
+
+            if (
+                !gestureId ||
+                actionsContainClickGesture(
+                    gestureId
+                )
+            ) {
+                return false;
+            }
         }
 
         const actionKey =
@@ -945,10 +1156,66 @@ function getClickXPathComparisonValue(
      * Commits a click using only pre-click values supplied by listeners.js.
      *
      * No XPath is recalculated here.
+     *
+     * Deduplication order:
+     *
+     * 1. Physical gestureId.
+     * 2. Click payload validation.
+     * 3. Consecutive XPath comparison.
+     * 4. Final actions-array gesture check.
      */
     function commitClickJob(
         job
     ) {
+        const gestureId =
+            getClickGestureId(
+                job
+            );
+
+        if (!gestureId) {
+            return {
+                accepted:
+                    false,
+
+                sequence:
+                    job?.sequence ??
+                    null,
+
+                reason:
+                    "Click contains no valid physical gestureId"
+            };
+        }
+
+        /*
+         * This is the important new check.
+         *
+         * The td action and button action may have different XPath values,
+         * but if they originated from the same pointerdown they carry the
+         * same gestureId. Only the first one can continue.
+         */
+        if (
+            hasAcceptedClickGesture(
+                gestureId
+            )
+        ) {
+            return {
+                accepted:
+                    false,
+
+                duplicate:
+                    true,
+
+                gestureId,
+
+                sequence:
+                    job?.sequence ??
+                    null,
+
+                reason:
+                    "Physical click gesture was already committed"
+            };
+        }
+
         const built =
             buildAcceptedClickAction(
                 job
@@ -959,6 +1226,8 @@ function getClickXPathComparisonValue(
         ) {
             return {
                 ...built,
+
+                gestureId,
 
                 sequence:
                     job?.sequence ??
@@ -976,6 +1245,8 @@ function getClickXPathComparisonValue(
             return {
                 accepted:
                     false,
+
+                gestureId,
 
                 sequence:
                     job?.sequence ??
@@ -996,6 +1267,8 @@ function getClickXPathComparisonValue(
 
                 duplicate:
                     true,
+
+                gestureId,
 
                 sequence:
                     job?.sequence ??
@@ -1019,9 +1292,43 @@ function getClickXPathComparisonValue(
             );
 
         if (!committed) {
+            /*
+             * Another submission with this gesture may have entered the
+             * actions array between the initial check and this final commit
+             * check.
+             */
+            if (
+                actionsContainClickGesture(
+                    gestureId
+                )
+            ) {
+                acceptedClickGestureIds.add(
+                    gestureId
+                );
+
+                return {
+                    accepted:
+                        false,
+
+                    duplicate:
+                        true,
+
+                    gestureId,
+
+                    sequence:
+                        job?.sequence ??
+                        null,
+
+                    reason:
+                        "Physical click gesture already exists in actions"
+                };
+            }
+
             return {
                 accepted:
                     false,
+
+                gestureId,
 
                 sequence:
                     job?.sequence ??
@@ -1032,12 +1339,24 @@ function getClickXPathComparisonValue(
             };
         }
 
+        /*
+         * Register only after the action has entered the actions array.
+         *
+         * A malformed first submission therefore does not permanently block
+         * a valid second submission carrying the same gesture ID.
+         */
+        registerAcceptedClickGesture(
+            gestureId
+        );
+
         lastAcceptedClickXPath =
             clickXPath;
 
         return {
             accepted:
                 true,
+
+            gestureId,
 
             sequence:
                 job?.sequence ??
@@ -1150,6 +1469,9 @@ function getClickXPathComparisonValue(
     try {
         /*
          * Existing non-click actions continue through this binding.
+         *
+         * Clicks forwarded through this binding still pass through the same
+         * gesture-aware commit function.
          */
         await context
             .exposeBinding(
@@ -1187,8 +1509,8 @@ function getClickXPathComparisonValue(
         /*
          * Direct click capture.
          *
-         * selector, primary_xpath and backup_xpath were already generated
-         * and validated before the click.
+         * selector, primary_xpath, backup_xpath and gestureId were already
+         * generated before or from the physical click in listeners.js.
          */
         await context
             .exposeBinding(

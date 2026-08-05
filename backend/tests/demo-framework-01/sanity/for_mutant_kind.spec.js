@@ -1,6 +1,6 @@
 import testData from '../test-data.json';
 import { test, expect } from '../utils/smart-test.js';
-
+ 
 test('generated flow @sanity', async ({ page }) => {
     await page.goto(testData.url);
     await page.waitForLoadState('domcontentloaded');
@@ -10,37 +10,33 @@ test('generated flow @sanity', async ({ page }) => {
     await page.locator("xpath=//input[@*[name()='type' and .='password']]").click();
     await page.getByRole('textbox', { name: 'Password' }).fill(testData.pass);
     await page.locator("xpath=//button[@*[name()='type' and .='submit']]").click();
-    await page.locator("xpath=//input[@*[name()='type' and .='search']]").click();
     await page.getByRole('searchbox', { name: 'Search' }).fill(testData.search);
     await page.locator("xpath=//span[@*[name()='data-pc-section' and .='nodelabel']]").click();
-    await page.locator("xpath=//a[@*[name()='href' and .='/corsair/order/list']]").click();
     await page.locator("xpath=//a[@*[name()='href' and .='/corsair/shipment/list']]").click();
-    await page.locator("xpath=//button[@*[name()='aria-label' and .='More Filters']]").click();
-    await page.locator("xpath=//li[@*[name()='aria-label' and .='Shipment Status']]//input[@*[name()='type' and .='checkbox']]").click();
-    await page.locator("xpath=//label[@*[name()='for' and .='criteria-TAG']]/following::div[normalize-space(.)='Shipment StatusShipment Status']//div[@*[name()='data-pc-section' and .='dropdown']]").click();
-    await page.locator("xpath=//div[@*[name()='aria-label' and .='Planning']]/preceding::div[@*[name()='data-pc-name' and .='pcoptioncheckbox']]//input[@*[name()='type' and .='checkbox']]").click();
-    // await page.locator("xpath=//tr[@*[name()='tabindex' and .='0']]//a[normalize-space(.)='124939']").click();
+    await page.locator("xpath=//a[@*[name()='data-pc-name' and .='button']]").click();
+    await page.locator("xpath=//span[@*[name()='aria-label' and .='Find an order template']]/following-sibling::div[@*[name()='data-pc-section' and .='dropdown']]").click();
+    await page.locator("xpath=//li[@*[name()='aria-label' and .='demo']]").click();
+    await page.locator("xpath=//button[@*[name()='data-p' and .='rounded']]").click();
     await page.locator("xpath=//button[@*[name()='aria-label' and .='Add Quote']]").click();
     await page.locator("xpath=//span[@*[name()='aria-label' and .='Mode']]/following-sibling::div[@*[name()='data-pc-section' and .='dropdown']]").click();
-    await page.locator("xpath=//li[@*[name()='aria-label' and .='FCL']]").click();
+    await page.locator("xpath=//li[@*[name()='aria-label' and .='TL']]").click();
     await page.locator("xpath=//tfoot[@*[name()='data-p-scrollable' and .='true']]/preceding::tr[normalize-space(.)='LinehaulBuy RateMarginFlatSell Rate']//input[@*[name()='aria-valuemin' and .='0']]").click();
     await page.locator("xpath=//button[@*[name()='aria-label' and .='Save Quote']]").click();
     await page.locator("xpath=//button[@*[name()='aria-hidden' and .='false']]").click();
     await page.locator("xpath=//span[@*[name()='data-pc-section' and .='lastfocusableelement']]/preceding::button[normalize-space(.)='Confirm']").click();
-    await page.locator("xpath=//div[@*[name()='data-testid' and .='shipment-detail-action-button']]//button[@*[name()='data-pc-name' and .='pcbutton']]").click();
+    await page.locator("xpath=//button[@*[name()='data-p' and .='icon-only outlined']]/preceding-sibling::button[@*[name()='type' and .='button']]").click();
     await page.locator("xpath=//button[@*[name()='aria-label' and .='Add Pickup']]").click();
     await page.locator("xpath=//input[@*[name()='id' and .='actual-arrival']]/following-sibling::button[@*[name()='type' and .='button']]").click();
-    await page.locator("xpath=//td[@*[name()='aria-label' and .='20']]//span[@*[name()='data-pc-section' and .='day']]").click();
+    await page.locator("xpath=//td[@*[name()='aria-label' and .='12']]//span[@*[name()='data-pc-section' and .='day']]").click();
     await page.locator("xpath=//input[@*[name()='id' and .='actual-arrival']]/following-sibling::button[@*[name()='type' and .='button']]").click();
     await page.locator("xpath=//input[@*[name()='id' and .='actual-departure']]/following-sibling::button[@*[name()='type' and .='button']]").click();
     await page.locator("xpath=//td[@*[name()='aria-label' and .='20']]//span[@*[name()='data-pc-section' and .='day']]").click();
-    await page.locator("xpath=//td[@*[name()='aria-label' and .='21']]//span[@*[name()='data-pc-section' and .='day']]").click();
     await page.locator("xpath=//button[@*[name()='aria-label' and .='Save Event']]").click();
     await page.locator("xpath=//button[@*[name()='aria-label' and .='Add Delivery']]").click();
     await page.locator("xpath=//input[@*[name()='id' and .='actual-arrival']]/following-sibling::button[@*[name()='type' and .='button']]").click();
-    await page.locator("xpath=//td[@*[name()='aria-label' and .='23']]/following::td[@*[name()='aria-label' and .='30']]//span[@*[name()='data-pc-section' and .='day']]").click();
+    await page.locator("xpath=//td[@*[name()='aria-label' and .='25']]/following::td[@*[name()='aria-label' and .='26']]//span[@*[name()='data-pc-section' and .='day']]").click();
     await page.locator("xpath=//input[@*[name()='id' and .='actual-arrival']]/following-sibling::button[@*[name()='type' and .='button']]").click();
     await page.locator("xpath=//input[@*[name()='id' and .='actual-departure']]/following-sibling::button[@*[name()='type' and .='button']]").click();
-    await page.locator("xpath=//td[@*[name()='aria-label' and .='23']]/following::td[@*[name()='aria-label' and .='31']]//span[@*[name()='data-pc-section' and .='day']]").click();
+    await page.locator("xpath=//td[@*[name()='aria-label' and .='25']]/following::td[@*[name()='aria-label' and .='28']]//span[@*[name()='data-pc-section' and .='day']]").click();
     await page.locator("xpath=//button[@*[name()='aria-label' and .='Save Event']]").click();
 });

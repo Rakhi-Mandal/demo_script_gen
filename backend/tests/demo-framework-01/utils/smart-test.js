@@ -1,63 +1,65 @@
-const fs =
-    require("node:fs");
-
-const path =
-    require("node:path");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const {
     test: base,
     expect
-} =
-    require("@playwright/test");
+} = require("@playwright/test");
 
 const {
     createSmartClickPage
-} =
-    require("./smart-click");
+} = require("./smart-click");
 
 /*
- * smart-test.js is expected at:
+ * Robust same-locator click handling.
  *
- * backend/
- *   tests/
- *     demo-framework-01/
- *       utils/
- *         smart-test.js
- *
- * Therefore ../../../codegen-output resolves to:
- *
- * backend/codegen-output
+ * - No alternate selector is generated.
+ * - primary_xpath and backup_xpath are ignored.
+ * - Readiness checks use trial clicks, so they do not dispatch application
+ *   clicks.
+ * - Exactly one real click is dispatched after the locator becomes usable.
+ * - Disabled, unstable, off-screen, covered, detached, rerendered and
+ *   navigation-related states are repeatedly retried.
  */
-const DEFAULT_CODEGEN_OUTPUT_DIR =
-    path.resolve(
-        __dirname,
-        "../../../codegen-output"
-    );
+const INITIAL_ACTIONABILITY_TIMEOUT_MS = 1000;
+const CLICK_RETRY_DELAY_MS = 3000;
+const RETRY_ACTIONABILITY_TIMEOUT_MS = 15000;
+const ACTIONABILITY_PROBE_SLICE_MS = 1500;
+const ACTIONABILITY_POLL_INTERVAL_MS = 250;
+const REAL_CLICK_TIMEOUT_MS = 15000;
+const PAGE_READY_TIMEOUT_MS = 15000;
+const POST_CLICK_NAVIGATION_GRACE_MS = 15000;
 
-function normalizeSelector(
-    value
-) {
-    const trimmed =
-        String(
-            value || ""
-        ).trim();
+const DEFAULT_CODEGEN_OUTPUT_DIR = path.resolve(
+    __dirname,
+    "../../../codegen-output"
+);
+
+function delay(milliseconds) {
+    return new Promise(resolve => {
+        setTimeout(resolve, milliseconds);
+    });
+}
+
+function formatError(error) {
+    return (
+        error instanceof Error
+            ? error.message
+            : String(error)
+    )
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function normalizeSelector(value) {
+    const trimmed = String(value || "").trim();
 
     if (!trimmed) {
         return "";
     }
 
-    if (
-        /^xpath=/i.test(
-            trimmed
-        )
-    ) {
-        return (
-            "xpath=" +
-            trimmed.replace(
-                /^xpath=/i,
-                ""
-            )
-        );
+    if (/^xpath=/i.test(trimmed)) {
+        return "xpath=" + trimmed.replace(/^xpath=/i, "");
     }
 
     if (
@@ -70,432 +72,207 @@ function normalizeSelector(
     return trimmed;
 }
 
-function isDirectory(
-    directoryPath
-) {
+function isXPathSelector(value) {
+    return /^xpath=/i.test(
+        normalizeSelector(value)
+    );
+}
+
+function isLocatorLike(value) {
+    return Boolean(
+        value &&
+        typeof value === "object" &&
+        typeof value.click === "function" &&
+        typeof value.count === "function" &&
+        typeof value.locator === "function"
+    );
+}
+
+function isDirectory(directoryPath) {
     try {
-        return fs
-            .statSync(
-                directoryPath
-            )
-            .isDirectory();
+        return fs.statSync(directoryPath).isDirectory();
     } catch {
         return false;
     }
 }
 
-function isFile(
-    filePath
-) {
+function isFile(filePath) {
     try {
-        return fs
-            .statSync(
-                filePath
-            )
-            .isFile();
+        return fs.statSync(filePath).isFile();
     } catch {
         return false;
     }
 }
 
-/**
- * smart-click.js writes a temporary file into the destination directory
- * before replacing the original file.
- *
- * Therefore checking only the file itself is insufficient. The parent
- * directory must also allow temporary-file creation and replacement.
- */
-function assertReadableWritableFile(
-    filePath,
-    description
-) {
-    const resolvedPath =
-        path.resolve(
-            filePath
-        );
-
-    if (
-        !isFile(
-            resolvedPath
-        )
-    ) {
-        throw new Error(
-            [
-                "",
-                `${description} does not exist or is not a file.`,
-                `Resolved path: ${resolvedPath}`
-            ].join("\n")
-        );
-    }
-
-    try {
-        fs.accessSync(
-            resolvedPath,
-            fs.constants.R_OK |
-            fs.constants.W_OK
-        );
-    } catch (error) {
-        throw new Error(
-            [
-                "",
-                `${description} is not readable and writable.`,
-                `Resolved path: ${resolvedPath}`,
-                `Reason: ${
-                    error instanceof Error
-                        ? error.message
-                        : String(error)
-                }`
-            ].join("\n")
-        );
-    }
-
-    const parentDirectory =
-        path.dirname(
-            resolvedPath
-        );
-
-    try {
-        fs.accessSync(
-            parentDirectory,
-            fs.constants.R_OK |
-            fs.constants.W_OK
-        );
-    } catch (error) {
-        throw new Error(
-            [
-                "",
-                `${description} parent directory is not writable.`,
-                `Directory: ${parentDirectory}`,
-                "",
-                "smart-click.js needs permission to create and rename",
-                "temporary files in this directory.",
-                "",
-                `Reason: ${
-                    error instanceof Error
-                        ? error.message
-                        : String(error)
-                }`
-            ].join("\n")
-        );
-    }
-
-    return resolvedPath;
-}
-
-function getParentDirectories(
-    startingPath
-) {
-    const directories =
-        [];
-
-    let current =
-        path.resolve(
-            startingPath
-        );
+function getParentDirectories(startingPath) {
+    const directories = [];
+    let current = path.resolve(startingPath);
 
     if (isFile(current)) {
-        current =
-            path.dirname(
-                current
-            );
+        current = path.dirname(current);
     }
 
     while (true) {
-        directories.push(
-            current
-        );
+        directories.push(current);
 
-        const parent =
-            path.dirname(
-                current
-            );
+        const parent = path.dirname(current);
 
-        if (
-            parent === current
-        ) {
+        if (parent === current) {
             break;
         }
 
-        current =
-            parent;
+        current = parent;
     }
 
     return directories;
 }
 
-/**
- * Locates:
- *
- * C:\record_and_play_back-updated-framework_01\
- * backend\codegen-output
- *
- * Resolution order:
- *
- * 1. PW_CODEGEN_OUTPUT_DIR environment variable.
- * 2. Known location relative to this smart-test.js file.
- * 3. Upward search from the supplied starting paths.
+/*
+ * The actions directory is optional. Ordinary test files must work even when
+ * no trace directory or matching actions JSON exists.
  */
-function findCodegenOutputDirectory(
-    startingPaths
-) {
+function findCodegenOutputDirectory(startingPaths) {
     const configuredDirectory =
-        process.env
-            .PW_CODEGEN_OUTPUT_DIR
-            ?.trim();
+        process.env.PW_CODEGEN_OUTPUT_DIR?.trim();
 
     if (configuredDirectory) {
-        const resolvedDirectory =
-            path.resolve(
-                configuredDirectory
-            );
+        const resolvedDirectory = path.resolve(
+            configuredDirectory
+        );
 
-        if (
-            !isDirectory(
-                resolvedDirectory
-            )
-        ) {
-            throw new Error(
-                [
-                    "",
-                    "PW_CODEGEN_OUTPUT_DIR does not exist.",
-                    `Resolved path: ${resolvedDirectory}`
-                ].join("\n")
-            );
-        }
-
-        return resolvedDirectory;
+        return isDirectory(resolvedDirectory)
+            ? resolvedDirectory
+            : "";
     }
 
-    /*
-     * Check the known framework layout first.
-     */
-    if (
-        isDirectory(
-            DEFAULT_CODEGEN_OUTPUT_DIR
-        )
-    ) {
+    if (isDirectory(DEFAULT_CODEGEN_OUTPUT_DIR)) {
         return DEFAULT_CODEGEN_OUTPUT_DIR;
     }
 
-    const checkedDirectories =
-        new Set([
-            DEFAULT_CODEGEN_OUTPUT_DIR
-        ]);
-
-    for (
-        const startingPath of
-        startingPaths
-    ) {
+    for (const startingPath of startingPaths) {
         if (!startingPath) {
             continue;
         }
 
-        const parentDirectories =
-            getParentDirectories(
-                startingPath
-            );
-
         for (
             const currentDirectory of
-            parentDirectories
+            getParentDirectories(startingPath)
         ) {
-            /*
-             * When currentDirectory is backend:
-             *
-             * backend/codegen-output
-             */
-            const directCandidate =
-                path.join(
-                    currentDirectory,
-                    "codegen-output"
-                );
-
-            /*
-             * When currentDirectory is the repository root:
-             *
-             * repository/backend/codegen-output
-             */
-            const backendCandidate =
-                path.join(
-                    currentDirectory,
-                    "backend",
-                    "codegen-output"
-                );
-
-            checkedDirectories.add(
-                directCandidate
+            const directCandidate = path.join(
+                currentDirectory,
+                "codegen-output"
             );
 
-            checkedDirectories.add(
-                backendCandidate
+            const backendCandidate = path.join(
+                currentDirectory,
+                "backend",
+                "codegen-output"
             );
 
-            if (
-                isDirectory(
-                    directCandidate
-                )
-            ) {
+            if (isDirectory(directCandidate)) {
                 return directCandidate;
             }
 
-            if (
-                isDirectory(
-                    backendCandidate
-                )
-            ) {
+            if (isDirectory(backendCandidate)) {
                 return backendCandidate;
             }
         }
     }
 
-    throw new Error(
-        [
-            "",
-            "Could not find the codegen-output directory.",
-            "",
-            "Checked:",
-            ...Array.from(
-                checkedDirectories
-            ).map(
-                directory =>
-                    `- ${directory}`
-            ),
-            "",
-            "Expected location:",
-            "C:\\record_and_play_back-updated-framework_01\\backend\\codegen-output",
-            "",
-            "You can explicitly set PW_CODEGEN_OUTPUT_DIR."
-        ].join("\n")
-    );
+    return "";
 }
 
-function decodeJavaScriptStringLiteral(
-    literal
-) {
+function decodeJavaScriptStringLiteral(literal) {
     if (
-        typeof literal !==
-            "string" ||
+        typeof literal !== "string" ||
         literal.length < 2
     ) {
         return null;
     }
 
-    const quote =
-        literal[0];
+    const quote = literal[0];
 
-    if (
-        quote !== '"' &&
-        quote !== "'"
-    ) {
+    if (quote !== '"' && quote !== "'") {
         return null;
     }
 
-    if (
-        literal[
-            literal.length - 1
-        ] !== quote
-    ) {
+    if (literal[literal.length - 1] !== quote) {
         return null;
     }
 
     if (quote === '"') {
         try {
-            return JSON.parse(
-                literal
-            );
+            return JSON.parse(literal);
         } catch {
             return null;
         }
     }
 
-    let result =
-        "";
-
-    let escaped =
-        false;
+    let result = "";
+    let escaped = false;
 
     for (
         let index = 1;
-        index <
-            literal.length - 1;
+        index < literal.length - 1;
         index += 1
     ) {
-        const character =
-            literal[index];
+        const character = literal[index];
 
         if (!escaped) {
-            if (
-                character === "\\"
-            ) {
-                escaped =
-                    true;
-
+            if (character === "\\") {
+                escaped = true;
                 continue;
             }
 
-            result +=
-                character;
-
+            result += character;
             continue;
         }
 
-        escaped =
-            false;
+        escaped = false;
 
         switch (character) {
             case "n":
-                result +=
-                    "\n";
+                result += "\n";
                 break;
 
             case "r":
-                result +=
-                    "\r";
+                result += "\r";
                 break;
 
             case "t":
-                result +=
-                    "\t";
+                result += "\t";
                 break;
 
             case "b":
-                result +=
-                    "\b";
+                result += "\b";
                 break;
 
             case "f":
-                result +=
-                    "\f";
+                result += "\f";
                 break;
 
             case "v":
-                result +=
-                    "\v";
+                result += "\v";
                 break;
 
             case "0":
-                result +=
-                    "\0";
+                result += "\0";
                 break;
 
             case "\\":
-                result +=
-                    "\\";
+                result += "\\";
                 break;
 
             case "'":
-                result +=
-                    "'";
+                result += "'";
                 break;
 
             case '"':
-                result +=
-                    '"';
+                result += '"';
                 break;
 
             default:
-                result +=
-                    character;
+                result += character;
                 break;
         }
     }
@@ -505,1047 +282,1029 @@ function decodeJavaScriptStringLiteral(
         : result;
 }
 
-/**
- * Extracts only direct click statements of this form:
+/*
+ * Extracts direct generated click statements such as:
  *
  * await page.locator("xpath=...").click();
- *
- * This matches the generated-spec click contract.
  */
-function extractDirectClickSelectorsFromSource(
-    sourceText
-) {
-    const selectors =
-        [];
+function extractDirectClickSelectorsFromSource(sourceText) {
+    const selectors = [];
 
     const directClickPattern =
         /await\s+page\.locator\(\s*((?:"(?:\\.|[^"\\])*")|(?:'(?:\\.|[^'\\])*'))\s*\)\s*\.click\s*\(/g;
 
     for (
         const match of
-        String(
-            sourceText || ""
-        ).matchAll(
+        String(sourceText || "").matchAll(
             directClickPattern
         )
     ) {
         const decoded =
-            decodeJavaScriptStringLiteral(
-                match[1]
-            );
+            decodeJavaScriptStringLiteral(match[1]);
 
-        if (
-            decoded === null
-        ) {
+        if (decoded === null) {
             continue;
         }
 
         selectors.push(
-            normalizeSelector(
-                decoded
-            )
+            normalizeSelector(decoded)
         );
     }
 
     return selectors;
 }
 
-function extractDirectClickSelectorsFromFile(
-    testFilePath
-) {
-    try {
-        const sourceText =
-            fs.readFileSync(
-                testFilePath,
-                "utf8"
-            );
+function extractDirectClickSelectorsFromFile(testFilePath) {
+    if (
+        !testFilePath ||
+        !isFile(testFilePath)
+    ) {
+        return [];
+    }
 
+    try {
         return extractDirectClickSelectorsFromSource(
-            sourceText
+            fs.readFileSync(testFilePath, "utf8")
         );
     } catch {
         return [];
     }
 }
 
-function listActionsFiles(
-    codegenOutputDirectory
-) {
-    return fs.readdirSync(
-        codegenOutputDirectory,
-        {
-            withFileTypes:
-                true
-        }
-    )
-        .filter(
-            entry => {
+function listActionsFiles(codegenOutputDirectory) {
+    if (
+        !codegenOutputDirectory ||
+        !isDirectory(codegenOutputDirectory)
+    ) {
+        return [];
+    }
+
+    try {
+        return fs.readdirSync(
+            codegenOutputDirectory,
+            {
+                withFileTypes: true
+            }
+        )
+            .filter(entry => {
                 return (
                     entry.isFile() &&
                     /^actions(?:-.*)?\.json$/i.test(
                         entry.name
                     )
                 );
-            }
-        )
-        .map(
-            entry => {
-                const filePath =
-                    path.join(
-                        codegenOutputDirectory,
-                        entry.name
-                    );
-
-                const stats =
-                    fs.statSync(
-                        filePath
-                    );
+            })
+            .map(entry => {
+                const filePath = path.join(
+                    codegenOutputDirectory,
+                    entry.name
+                );
 
                 return {
                     filePath,
-
                     modifiedAt:
-                        stats.mtimeMs
+                        fs.statSync(filePath).mtimeMs
                 };
-            }
-        )
-        .sort(
-            (
-                first,
-                second
-            ) =>
-                second.modifiedAt -
-                first.modifiedAt
-        );
+            })
+            .sort((first, second) => {
+                return (
+                    second.modifiedAt -
+                    first.modifiedAt
+                );
+            });
+    } catch {
+        return [];
+    }
 }
 
-function inspectActionsFileForSelection(
-    fileEntry
-) {
+function readActionsFile(filePath) {
     try {
-        const source =
-            fs.readFileSync(
-                fileEntry.filePath,
-                "utf8"
-            );
-
-        const parsed =
-            JSON.parse(
-                source
-            );
+        const parsed = JSON.parse(
+            fs.readFileSync(filePath, "utf8")
+        );
 
         if (!Array.isArray(parsed)) {
             return {
-                ...fileEntry,
-
-                valid:
-                    false,
-
-                reason:
-                    "JSON root is not an array",
-
-                clickSelectors:
-                    []
+                valid: false,
+                reason: "JSON root is not an array",
+                actions: [],
+                clickSelectors: []
             };
         }
 
-        const clickSelectors =
-            parsed
-                .filter(
-                    action =>
-                        action?.action ===
-                        "click"
-                )
-                .map(
-                    action =>
-                        normalizeSelector(
-                            action.selector
-                        )
-                );
+        const clickActions = parsed.filter(action => {
+            return action?.action === "click";
+        });
 
-        if (!clickSelectors.length) {
+        if (!clickActions.length) {
             return {
-                ...fileEntry,
-
-                valid:
-                    false,
-
-                reason:
-                    "contains no click actions",
-
-                clickSelectors:
-                    []
+                valid: false,
+                reason: "contains no click actions",
+                actions: [],
+                clickSelectors: []
             };
         }
 
-        if (
-            clickSelectors.some(
-                selector =>
-                    !selector
-            )
-        ) {
-            return {
-                ...fileEntry,
+        const clickSelectors = [];
 
-                valid:
-                    false,
+        for (const action of clickActions) {
+            const selector = normalizeSelector(
+                action.selector
+            );
 
-                reason:
-                    "contains a click without a selector",
+            if (!selector) {
+                return {
+                    valid: false,
+                    reason:
+                        "contains a click without a selector",
+                    actions: [],
+                    clickSelectors: []
+                };
+            }
 
-                clickSelectors
-            };
+            if (!isXPathSelector(selector)) {
+                return {
+                    valid: false,
+                    reason:
+                        "contains a click whose selector is not XPath",
+                    actions: [],
+                    clickSelectors: []
+                };
+            }
+
+            action.selector = selector;
+            clickSelectors.push(selector);
         }
 
         return {
-            ...fileEntry,
-
-            valid:
-                true,
-
-            reason:
-                "",
-
+            valid: true,
+            reason: "",
+            actions: parsed,
             clickSelectors
         };
     } catch (error) {
         return {
-            ...fileEntry,
-
-            valid:
-                false,
-
-            reason:
-                error instanceof Error
-                    ? error.message
-                    : String(error),
-
-            clickSelectors:
-                []
+            valid: false,
+            reason: formatError(error),
+            actions: [],
+            clickSelectors: []
         };
     }
 }
 
-function compareClickSequences(
-    specSelectors,
-    actionSelectors
-) {
-    const comparableLength =
-        Math.min(
-            specSelectors.length,
-            actionSelectors.length
-        );
-
-    let positionMatches =
-        0;
-
-    let prefixMatches =
-        0;
-
-    let prefixBroken =
-        false;
-
-    for (
-        let index = 0;
-        index <
-            comparableLength;
-        index += 1
-    ) {
-        const matches =
-            specSelectors[index] ===
-            actionSelectors[index];
-
-        if (matches) {
-            positionMatches +=
-                1;
-        }
-
-        if (!prefixBroken) {
-            if (matches) {
-                prefixMatches +=
-                    1;
-            } else {
-                prefixBroken =
-                    true;
-            }
-        }
+function selectorsMatchExactly(first, second) {
+    if (first.length !== second.length) {
+        return false;
     }
 
-    const exactMatch =
-        specSelectors.length ===
-            actionSelectors.length &&
-        positionMatches ===
-            specSelectors.length;
-
-    const countDifference =
-        Math.abs(
-            specSelectors.length -
-            actionSelectors.length
-        );
-
-    const denominator =
-        Math.max(
-            specSelectors.length,
-            actionSelectors.length,
-            1
-        );
-
-    const positionMatchRatio =
-        positionMatches /
-        denominator;
-
-    /*
-     * Exact sequence matches always win.
-     *
-     * Otherwise prioritize selectors that match at the same chronological
-     * click positions. Prefix matching helps distinguish traces that share
-     * only a common login sequence.
-     */
-    const score =
-        exactMatch
-            ? 1_000_000_000
-            : (
-                positionMatches *
-                    100_000 +
-                prefixMatches *
-                    1_000 -
-                countDifference *
-                    100
-            );
-
-    return {
-        exactMatch,
-        positionMatches,
-        prefixMatches,
-        countDifference,
-        positionMatchRatio,
-        score
-    };
+    return first.every((selector, index) => {
+        return selector === second[index];
+    });
 }
 
-/**
- * Selects the correct actions JSON.
- *
- * Resolution order:
- *
- * 1. PW_ACTIONS_PATH.
- * 2. Exact click-sequence match with the executing spec.
- * 3. Best chronological selector match.
- * 4. Most recently modified valid actions JSON, only when the spec contains
- *    no parseable direct click statements.
- *
- * This prevents an unrelated, recently recorded actions file from being
- * paired with the currently executing spec.
+/*
+ * Trace mode is enabled only for a complete, exact selector-sequence match.
+ * No latest-file fallback and no partial match are used.
  */
-function findActionsFile(
-    codegenOutputDirectory,
+function resolveOptionalTraceActions({
+    startingPaths,
     testFilePath
-) {
-    const configuredFile =
-        process.env
-            .PW_ACTIONS_PATH
-            ?.trim();
-
-    if (configuredFile) {
-        const resolvedFile =
-            path.resolve(
-                configuredFile
-            );
-
-        if (
-            !isFile(
-                resolvedFile
-            )
-        ) {
-            throw new Error(
-                [
-                    "",
-                    "PW_ACTIONS_PATH does not point to an existing file.",
-                    `Resolved path: ${resolvedFile}`
-                ].join("\n")
-            );
-        }
-
-        return {
-            actionsPath:
-                resolvedFile,
-
-            selectionReason:
-                "PW_ACTIONS_PATH"
-        };
-    }
-
-    const actionFileEntries =
-        listActionsFiles(
-            codegenOutputDirectory
-        );
-
-    if (!actionFileEntries.length) {
-        throw new Error(
-            [
-                "",
-                "No actions JSON file was found.",
-                `Directory: ${codegenOutputDirectory}`,
-                "",
-                "Expected a filename such as:",
-                "actions-2026-07-27T12-00-00.json"
-            ].join("\n")
-        );
-    }
-
-    const inspectedFiles =
-        actionFileEntries
-            .map(
-                inspectActionsFileForSelection
-            );
-
-    const validFiles =
-        inspectedFiles.filter(
-            entry =>
-                entry.valid
-        );
-
-    if (!validFiles.length) {
-        throw new Error(
-            [
-                "",
-                "No valid actions JSON file was found.",
-                `Directory: ${codegenOutputDirectory}`,
-                "",
-                "Rejected files:",
-                ...inspectedFiles.map(
-                    entry =>
-                        (
-                            `- ${entry.filePath}: ` +
-                            `${entry.reason || "invalid file"}`
-                        )
-                )
-            ].join("\n")
-        );
-    }
-
+}) {
     const specClickSelectors =
         extractDirectClickSelectorsFromFile(
             testFilePath
         );
 
-    /*
-     * If the spec has no direct generated click statements, sequence matching
-     * cannot be performed. Retain the previous latest-file fallback.
-     */
     if (!specClickSelectors.length) {
         return {
-            actionsPath:
-                validFiles[0]
-                    .filePath,
-
+            actionsPath: "",
+            actions: [],
             selectionReason:
-                (
-                    "latest valid actions file; " +
-                    "the spec contained no parseable direct XPath clicks"
-                )
+                "trace disabled; the spec has no parseable direct locator clicks"
         };
     }
-
-    const rankedFiles =
-        validFiles
-            .map(
-                entry => {
-                    const comparison =
-                        compareClickSequences(
-                            specClickSelectors,
-                            entry.clickSelectors
-                        );
-
-                    return {
-                        ...entry,
-                        comparison
-                    };
-                }
-            )
-            .sort(
-                (
-                    first,
-                    second
-                ) => {
-                    if (
-                        second
-                            .comparison
-                            .score !==
-                        first
-                            .comparison
-                            .score
-                    ) {
-                        return (
-                            second
-                                .comparison
-                                .score -
-                            first
-                                .comparison
-                                .score
-                        );
-                    }
-
-                    return (
-                        second.modifiedAt -
-                        first.modifiedAt
-                    );
-                }
-            );
-
-    const exactMatches =
-        rankedFiles.filter(
-            entry =>
-                entry
-                    .comparison
-                    .exactMatch
-        );
-
-    if (exactMatches.length) {
-        const selected =
-            exactMatches[0];
-
-        return {
-            actionsPath:
-                selected.filePath,
-
-            selectionReason:
-                (
-                    "exact direct-click selector sequence match; " +
-                    `${selected.clickSelectors.length} clicks`
-                )
-        };
-    }
-
-    const bestMatch =
-        rankedFiles[0];
-
-    const secondBest =
-        rankedFiles[1] ||
-        null;
-
-    const bestComparison =
-        bestMatch.comparison;
-
-    /*
-     * Reject a completely unrelated actions file.
-     *
-     * A partial match is accepted only when:
-     *
-     * - at least one chronological click matched;
-     * - the click counts are equal or at least half of the positions matched;
-     * - the best candidate is not tied with another file.
-     */
-    const hasUsableMatch =
-        bestComparison
-            .positionMatches > 0 &&
-        (
-            bestComparison
-                .countDifference === 0 ||
-            bestComparison
-                .positionMatchRatio >= 0.5
-        );
-
-    const tiedWithSecond =
-        Boolean(
-            secondBest &&
-            secondBest
-                .comparison
-                .score ===
-            bestComparison
-                .score
-        );
 
     if (
-        !hasUsableMatch ||
-        tiedWithSecond
+        specClickSelectors.some(selector => {
+            return !isXPathSelector(selector);
+        })
     ) {
-        throw new Error(
-            [
-                "",
-                "Could not safely identify the actions JSON for this spec.",
-                "",
-                `Executing spec: ${testFilePath}`,
-                `Spec click count: ${specClickSelectors.length}`,
-                "",
-                "Best candidates:",
-                ...rankedFiles
-                    .slice(
-                        0,
-                        5
-                    )
-                    .map(
-                        entry => {
-                            const comparison =
-                                entry.comparison;
-
-                            return [
-                                `- ${entry.filePath}`,
-                                (
-                                    `clicks=` +
-                                    `${entry.clickSelectors.length}`
-                                ),
-                                (
-                                    `positionMatches=` +
-                                    `${comparison.positionMatches}`
-                                ),
-                                (
-                                    `prefixMatches=` +
-                                    `${comparison.prefixMatches}`
-                                ),
-                                (
-                                    `ratio=` +
-                                    `${comparison.positionMatchRatio.toFixed(2)}`
-                                )
-                            ].join(" ");
-                        }
-                    ),
-                "",
-                "Set PW_ACTIONS_PATH to the exact actions JSON file",
-                "for this generated spec."
-            ].join("\n")
-        );
+        return {
+            actionsPath: "",
+            actions: [],
+            selectionReason:
+                "trace disabled; the spec contains a non-XPath direct click"
+        };
     }
 
-    return {
-        actionsPath:
-            bestMatch.filePath,
+    const configuredFile =
+        process.env.PW_ACTIONS_PATH?.trim();
 
-        selectionReason:
-            (
-                "best chronological direct-click selector match; " +
-                `${bestComparison.positionMatches}/` +
-                `${Math.max(
-                    specClickSelectors.length,
-                    bestMatch.clickSelectors.length
-                )} positions matched`
+    if (configuredFile) {
+        const resolvedFile = path.resolve(
+            configuredFile
+        );
+
+        if (!isFile(resolvedFile)) {
+            return {
+                actionsPath: "",
+                actions: [],
+                selectionReason:
+                    `trace disabled; PW_ACTIONS_PATH is not a file: ${resolvedFile}`
+            };
+        }
+
+        const inspected = readActionsFile(
+            resolvedFile
+        );
+
+        if (!inspected.valid) {
+            return {
+                actionsPath: "",
+                actions: [],
+                selectionReason:
+                    `trace disabled; configured actions file is invalid: ${inspected.reason}`
+            };
+        }
+
+        if (
+            !selectorsMatchExactly(
+                specClickSelectors,
+                inspected.clickSelectors
             )
-    };
-}
-
-function loadTraceActions(
-    actionsPath
-) {
-    let parsed;
-
-    try {
-        const content =
-            fs.readFileSync(
-                actionsPath,
-                "utf8"
-            );
-
-        parsed =
-            JSON.parse(
-                content
-            );
-    } catch (error) {
-        throw new Error(
-            [
-                "",
-                "Could not read or parse the actions JSON file.",
-                `File: ${actionsPath}`,
-                `Reason: ${
-                    error instanceof Error
-                        ? error.message
-                        : String(error)
-                }`
-            ].join("\n")
-        );
-    }
-
-    if (!Array.isArray(parsed)) {
-        throw new Error(
-            [
-                "",
-                "The actions JSON root must be an array.",
-                `File: ${actionsPath}`
-            ].join("\n")
-        );
-    }
-
-    const clickActions =
-        parsed.filter(
-            action =>
-                action?.action ===
-                "click"
-        );
-
-    if (!clickActions.length) {
-        throw new Error(
-            [
-                "",
-                "The actions JSON contains no click actions.",
-                `File: ${actionsPath}`
-            ].join("\n")
-        );
-    }
-
-    for (
-        const [
-            index,
-            action
-        ] of clickActions.entries()
-    ) {
-        if (!action.selector) {
-            throw new Error(
-                [
-                    "",
-                    "A recorded click has no selector.",
-                    `Click index: ${index}`,
-                    `File: ${actionsPath}`
-                ].join("\n")
-            );
+        ) {
+            return {
+                actionsPath: "",
+                actions: [],
+                selectionReason:
+                    "trace disabled; configured actions file does not exactly match this spec"
+            };
         }
 
-        if (!action.primary_xpath) {
-            throw new Error(
-                [
-                    "",
-                    "A recorded click has no primary_xpath.",
-                    `Click index: ${index}`,
-                    `Selector: ${action.selector}`,
-                    `File: ${actionsPath}`
-                ].join("\n")
-            );
-        }
-
-        if (!action.backup_xpath) {
-            throw new Error(
-                [
-                    "",
-                    "A recorded click has no backup_xpath.",
-                    `Click index: ${index}`,
-                    `Selector: ${action.selector}`,
-                    `File: ${actionsPath}`
-                ].join("\n")
-            );
-        }
+        return {
+            actionsPath: resolvedFile,
+            actions: inspected.actions,
+            selectionReason:
+                "PW_ACTIONS_PATH exact click-sequence match"
+        };
     }
 
-    return parsed;
-}
-
-function resolveTraceActions(
-    startingPaths,
-    testFilePath
-) {
     const codegenOutputDirectory =
         findCodegenOutputDirectory(
             startingPaths
         );
 
-    const {
-        actionsPath:
-            discoveredActionsPath,
+    if (!codegenOutputDirectory) {
+        return {
+            actionsPath: "",
+            actions: [],
+            selectionReason:
+                "trace disabled; codegen-output directory was not found"
+        };
+    }
 
-        selectionReason
-    } =
-        findActionsFile(
-            codegenOutputDirectory,
-            testFilePath
+    for (
+        const fileEntry of
+        listActionsFiles(codegenOutputDirectory)
+    ) {
+        const inspected = readActionsFile(
+            fileEntry.filePath
         );
 
-    /*
-     * smart-click.js must be able to rewrite this file after healing.
-     */
-    const actionsPath =
-        assertReadableWritableFile(
-            discoveredActionsPath,
-            "Actions JSON file"
-        );
+        if (!inspected.valid) {
+            continue;
+        }
 
-    const actions =
-        loadTraceActions(
-            actionsPath
-        );
+        if (
+            selectorsMatchExactly(
+                specClickSelectors,
+                inspected.clickSelectors
+            )
+        ) {
+            return {
+                actionsPath: fileEntry.filePath,
+                actions: inspected.actions,
+                selectionReason:
+                    `exact direct-click sequence match; ${inspected.clickSelectors.length} clicks`
+            };
+        }
+    }
 
     return {
-        actionsPath,
-        actions,
-        selectionReason
+        actionsPath: "",
+        actions: [],
+        selectionReason:
+            "trace disabled; no actions JSON exactly matched this spec"
     };
 }
 
-function assertSpecAndTraceClickCountsAreCompatible(
-    testFilePath,
-    actions
-) {
-    const specClickSelectors =
-        extractDirectClickSelectorsFromFile(
-            testFilePath
+async function waitForPageReadiness(page, timeout) {
+    try {
+        await page.waitForLoadState(
+            "domcontentloaded",
+            {
+                timeout
+            }
         );
-
-    /*
-     * Some manually written specs may not follow the generated direct-click
-     * contract. In that case smart-click.js can still associate clicks using
-     * the selector hint or chronological fallback.
-     */
-    if (!specClickSelectors.length) {
-        return;
-    }
-
-    const recordedClickCount =
-        actions.filter(
-            action =>
-                action?.action ===
-                "click"
-        ).length;
-
-    if (
-        specClickSelectors.length !==
-        recordedClickCount
-    ) {
-        throw new Error(
-            [
-                "",
-                "The executing spec and selected actions JSON have",
-                "different direct-click counts.",
-                "",
-                `Executing spec: ${testFilePath}`,
-                `Spec direct clicks: ${specClickSelectors.length}`,
-                `Recorded clicks: ${recordedClickCount}`,
-                "",
-                "Using mismatched files could cause one click to heal and",
-                "persist the selector of a different recorded action.",
-                "",
-                "Set PW_ACTIONS_PATH to the exact matching actions JSON."
-            ].join("\n")
-        );
+    } catch {
+        /*
+         * A SPA may already be usable while background navigation or network
+         * activity remains in progress. Locator trials remain the source of
+         * truth for click readiness.
+         */
     }
 }
 
-const test =
-    base.extend({
-        page: async (
+function createAttemptOptions(
+    options,
+    {
+        trial,
+        timeout,
+        noWaitAfter
+    }
+) {
+    const result = {
+        ...options,
+        trial,
+        timeout
+    };
+
+    if (noWaitAfter !== undefined) {
+        result.noWaitAfter = noWaitAfter;
+    }
+
+    return result;
+}
+
+/*
+ * For normal Playwright locators, strict-mode duplicates are handled by
+ * testing each nth() candidate. For smart-click trace locators, smart-click.js
+ * already resolves duplicate XPath matches, so the complete locator is used.
+ */
+async function findActionableCandidate({
+    locator,
+    options,
+    timeout,
+    traceMode
+}) {
+    if (traceMode) {
+        await locator.click(
+            createAttemptOptions(
+                options,
+                {
+                    trial: true,
+                    timeout,
+                    noWaitAfter: true
+                }
+            )
+        );
+
+        return locator;
+    }
+
+    let count = await locator.count();
+
+    if (count < 1) {
+        await locator.waitFor({
+            state: "attached",
+            timeout
+        });
+
+        count = await locator.count();
+    }
+
+    if (count < 1) {
+        throw new Error(
+            "Locator resolved to no elements"
+        );
+    }
+
+    if (count === 1) {
+        await locator.click(
+            createAttemptOptions(
+                options,
+                {
+                    trial: true,
+                    timeout,
+                    noWaitAfter: true
+                }
+            )
+        );
+
+        return locator;
+    }
+
+    const successfulCandidates = [];
+    const failures = [];
+    const startedAt = Date.now();
+    const deadline = startedAt + timeout;
+
+    for (
+        let index = 0;
+        index < count;
+        index += 1
+    ) {
+        const remaining = deadline - Date.now();
+
+        if (remaining <= 0) {
+            break;
+        }
+
+        const remainingCandidates =
+            Math.max(1, count - index);
+
+        const candidateTimeout = Math.max(
+            1,
+            Math.floor(
+                remaining /
+                remainingCandidates
+            )
+        );
+
+        const candidate = locator.nth(index);
+
+        try {
+            await candidate.click(
+                createAttemptOptions(
+                    options,
+                    {
+                        trial: true,
+                        timeout: candidateTimeout,
+                        noWaitAfter: true
+                    }
+                )
+            );
+
+            successfulCandidates.push({
+                index,
+                locator: candidate
+            });
+        } catch (error) {
+            failures.push(
+                `candidate ${index + 1}: ${formatError(error)}`
+            );
+        }
+    }
+
+    if (successfulCandidates.length === 1) {
+        return successfulCandidates[0].locator;
+    }
+
+    if (successfulCandidates.length > 1) {
+        throw new Error(
+            (
+                `Locator resolved to ${count} elements and ` +
+                `${successfulCandidates.length} were actionable. ` +
+                "The click is ambiguous."
+            )
+        );
+    }
+
+    throw new Error(
+        [
+            `Locator resolved to ${count} elements, but none became actionable.`,
+            ...failures
+        ].join("\n")
+    );
+}
+
+async function waitUntilActionable({
+    page,
+    locator,
+    options,
+    selectorHint,
+    timeout,
+    traceMode
+}) {
+    let attempt = 0;
+    let lastError = null;
+
+    await waitForPageReadiness(
+        page,
+        Math.min(
+            PAGE_READY_TIMEOUT_MS,
+            timeout,
+            2000
+        )
+    );
+
+    const startedAt = Date.now();
+    const deadline = startedAt + timeout;
+
+    while (Date.now() < deadline) {
+        attempt += 1;
+
+        const remaining = deadline - Date.now();
+
+        const probeTimeout = Math.max(
+            1,
+            Math.min(
+                ACTIONABILITY_PROBE_SLICE_MS,
+                remaining
+            )
+        );
+
+        try {
+            const candidate =
+                await findActionableCandidate({
+                    locator,
+                    options,
+                    timeout: probeTimeout,
+                    traceMode
+                });
+
+            return {
+                locator: candidate,
+                attempt,
+                elapsedMs:
+                    Date.now() - startedAt
+            };
+        } catch (error) {
+            lastError = error;
+
+            console.warn(
+                [
+                    "[smart-test]",
+                    "Actionability probe failed.",
+                    `attempt=${attempt}`,
+                    `elapsedMs=${Date.now() - startedAt}`,
+                    `selector=${selectorHint || "(unknown)"}`,
+                    `reason=${formatError(error)}`
+                ].join(" ")
+            );
+        }
+
+        const waitMs = Math.min(
+            ACTIONABILITY_POLL_INTERVAL_MS,
+            Math.max(
+                0,
+                deadline - Date.now()
+            )
+        );
+
+        if (waitMs > 0) {
+            await delay(waitMs);
+        }
+    }
+
+    throw new Error(
+        [
+            (
+                "The same locator did not become actionable " +
+                `within ${timeout}ms.`
+            ),
+            `selector: ${selectorHint || ""}`,
+            `last error: ${formatError(lastError)}`
+        ].join("\n")
+    );
+}
+
+async function executePreparedClick({
+    page,
+    locator,
+    options,
+    selectorHint,
+    actionabilityTimeout,
+    traceMode
+}) {
+    const prepared = await waitUntilActionable({
+        page,
+        locator,
+        options,
+        selectorHint,
+        timeout: actionabilityTimeout,
+        traceMode
+    });
+
+    if (options.trial === true) {
+        return;
+    }
+
+    const requestedTimeout = Number(
+        options.timeout
+    );
+
+    const realClickTimeout = Math.max(
+        REAL_CLICK_TIMEOUT_MS,
+        Number.isFinite(requestedTimeout) &&
+        requestedTimeout > 0
+            ? requestedTimeout
+            : 0
+    );
+
+    /*
+     * noWaitAfter avoids reporting a successful dispatch as a click failure
+     * merely because a subsequent navigation takes longer. Navigation is
+     * given its own best-effort grace period immediately afterward.
+     */
+    await prepared.locator.click(
+        createAttemptOptions(
+            options,
             {
-                page
-            },
-            use,
-            testInfo
-        ) => {
-            /*
-             * Resolve and verify the exact test file Playwright is executing.
-             *
-             * smart-click.js uses this path to replace the failed selector
-             * literal after reconstruction succeeds.
-             */
-            const testFilePath =
-                assertReadableWritableFile(
-                    testInfo.file,
-                    "Executing Playwright spec"
+                trial: false,
+                timeout: realClickTimeout,
+                noWaitAfter: true
+            }
+        )
+    );
+
+    await delay(100);
+
+    await waitForPageReadiness(
+        page,
+        POST_CLICK_NAVIGATION_GRACE_MS
+    );
+
+    console.log(
+        [
+            "[smart-test]",
+            "Prepared click succeeded.",
+            `selector=${selectorHint || "(unknown)"}`,
+            `probeAttempt=${prepared.attempt}`,
+            `probeElapsedMs=${prepared.elapsedMs}`,
+            `realClickTimeoutMs=${realClickTimeout}`
+        ].join(" ")
+    );
+}
+
+function createDelayedClickRetryPage(
+    page,
+    {
+        rawPage,
+        traceSelectors
+    }
+) {
+    const locatorFactoryNames = new Set([
+        "locator",
+        "getByRole",
+        "getByText",
+        "getByLabel",
+        "getByPlaceholder",
+        "getByAltText",
+        "getByTitle",
+        "getByTestId"
+    ]);
+
+    function wrapLocator(
+        locator,
+        selectorHint
+    ) {
+        return new Proxy(
+            locator,
+            {
+                get(target, property) {
+                    if (property === "click") {
+                        return async (
+                            options = {}
+                        ) => {
+                            const traceMode =
+                                traceSelectors.has(
+                                    normalizeSelector(selectorHint)
+                                );
+
+                            try {
+                                return await executePreparedClick({
+                                    page: rawPage,
+                                    locator: target,
+                                    options,
+                                    selectorHint,
+                                    actionabilityTimeout:
+                                        INITIAL_ACTIONABILITY_TIMEOUT_MS,
+                                    traceMode
+                                });
+                            } catch (firstError) {
+                                if (options.trial === true) {
+                                    throw firstError;
+                                }
+
+                                console.warn(
+                                    [
+                                        "[smart-test]",
+                                        "Initial prepared click failed.",
+                                        `selector=${selectorHint || "(unknown)"}`,
+                                        `reason=${formatError(firstError)}`,
+                                        `waitingMs=${CLICK_RETRY_DELAY_MS}`,
+                                        "Retrying the same locator."
+                                    ].join(" ")
+                                );
+
+                                await delay(
+                                    CLICK_RETRY_DELAY_MS
+                                );
+
+                                try {
+                                    return await executePreparedClick({
+                                        page: rawPage,
+                                        locator: target,
+                                        options,
+                                        selectorHint,
+                                        actionabilityTimeout:
+                                            RETRY_ACTIONABILITY_TIMEOUT_MS,
+                                        traceMode
+                                    });
+                                } catch (secondError) {
+                                    throw new Error(
+                                        [
+                                            "",
+                                            "[smart-test] Click failed after robust same-locator retry.",
+                                            "",
+                                            `selector: ${selectorHint || ""}`,
+                                            (
+                                                "initial actionability timeout: " +
+                                                `${INITIAL_ACTIONABILITY_TIMEOUT_MS}ms`
+                                            ),
+                                            (
+                                                "delay before retry: " +
+                                                `${CLICK_RETRY_DELAY_MS}ms`
+                                            ),
+                                            (
+                                                "retry actionability timeout: " +
+                                                `${RETRY_ACTIONABILITY_TIMEOUT_MS}ms`
+                                            ),
+                                            (
+                                                "real click timeout: at least " +
+                                                `${REAL_CLICK_TIMEOUT_MS}ms`
+                                            ),
+                                            "",
+                                            `initial error: ${formatError(firstError)}`,
+                                            `retry error: ${formatError(secondError)}`
+                                        ].join("\n"),
+                                        {
+                                            cause: secondError
+                                        }
+                                    );
+                                }
+                            }
+                        };
+                    }
+
+                    const value = Reflect.get(
+                        target,
+                        property,
+                        target
+                    );
+
+                    if (typeof value !== "function") {
+                        return value;
+                    }
+
+                    return (...args) => {
+                        const result = value.apply(
+                            target,
+                            args
+                        );
+
+                        if (isLocatorLike(result)) {
+                            const nextSelectorHint =
+                                property === "locator" &&
+                                typeof args[0] === "string"
+                                    ? normalizeSelector(args[0])
+                                    : selectorHint;
+
+                            return wrapLocator(
+                                result,
+                                nextSelectorHint
+                            );
+                        }
+
+                        if (
+                            property === "frameLocator" &&
+                            result
+                        ) {
+                            return wrapFrameLocator(result);
+                        }
+
+                        return result;
+                    };
+                }
+            }
+        );
+    }
+
+    function wrapFrameLocator(frameLocator) {
+        return new Proxy(
+            frameLocator,
+            {
+                get(target, property) {
+                    const value = Reflect.get(
+                        target,
+                        property,
+                        target
+                    );
+
+                    if (typeof value !== "function") {
+                        return value;
+                    }
+
+                    if (property === "frameLocator") {
+                        return (...args) => {
+                            return wrapFrameLocator(
+                                value.apply(target, args)
+                            );
+                        };
+                    }
+
+                    if (
+                        locatorFactoryNames.has(property)
+                    ) {
+                        return (...args) => {
+                            const locator = value.apply(
+                                target,
+                                args
+                            );
+
+                            const selectorHint =
+                                property === "locator" &&
+                                typeof args[0] === "string"
+                                    ? normalizeSelector(args[0])
+                                    : undefined;
+
+                            return wrapLocator(
+                                locator,
+                                selectorHint
+                            );
+                        };
+                    }
+
+                    return value.bind(target);
+                }
+            }
+        );
+    }
+
+    return new Proxy(
+        page,
+        {
+            get(target, property) {
+                const value = Reflect.get(
+                    target,
+                    property,
+                    target
                 );
 
-            const {
-                actionsPath,
-                actions,
-                selectionReason
-            } =
-                resolveTraceActions(
-                    [
-                        process.cwd(),
+                if (typeof value !== "function") {
+                    return value;
+                }
 
-                        testInfo.config
-                            .rootDir,
+                if (property === "frameLocator") {
+                    return (...args) => {
+                        return wrapFrameLocator(
+                            value.apply(target, args)
+                        );
+                    };
+                }
 
-                        testFilePath,
+                if (locatorFactoryNames.has(property)) {
+                    return (...args) => {
+                        const locator = value.apply(
+                            target,
+                            args
+                        );
 
-                        path.dirname(
-                            testFilePath
-                        ),
+                        const selectorHint =
+                            property === "locator" &&
+                            typeof args[0] === "string"
+                                ? normalizeSelector(args[0])
+                                : undefined;
 
-                        __dirname
-                    ],
+                        return wrapLocator(
+                            locator,
+                            selectorHint
+                        );
+                    };
+                }
 
-                    testFilePath
-                );
+                return value.bind(target);
+            }
+        }
+    );
+}
 
-            assertSpecAndTraceClickCountsAreCompatible(
+const test = base.extend({
+    page: async (
+        {
+            page
+        },
+        use,
+        testInfo
+    ) => {
+        const testFilePath = testInfo.file
+            ? path.resolve(testInfo.file)
+            : "";
+
+        const {
+            actionsPath,
+            actions,
+            selectionReason
+        } = resolveOptionalTraceActions({
+            startingPaths: [
+                process.cwd(),
+                testInfo.config.rootDir,
                 testFilePath,
-                actions
-            );
+                testFilePath
+                    ? path.dirname(testFilePath)
+                    : "",
+                __dirname
+            ],
+            testFilePath
+        });
 
-            const recordedClickCount =
-                actions.filter(
-                    action =>
-                        action?.action ===
-                        "click"
-                ).length;
+        const recordedClickCount =
+            actions.filter(action => {
+                return action?.action === "click";
+            }).length;
 
-            console.log(
-                `[smart-click] Implementation: ${require.resolve("./smart-click")}`
-            );
+        const traceMode =
+            recordedClickCount > 0;
 
+        const traceSelectors = new Set(
+            actions
+                .filter(action => {
+                    return action?.action === "click";
+                })
+                .map(action => {
+                    return normalizeSelector(
+                        action.selector
+                    );
+                })
+                .filter(Boolean)
+        );
+
+        console.log(
+            `[smart-click] Implementation: ${require.resolve("./smart-click")}`
+        );
+
+        console.log(
+            `[smart-click] Executing spec: ${testFilePath || "(unknown)"}`
+        );
+
+        console.log(
+            `[smart-click] Trace mode: ${traceMode ? "enabled" : "disabled"}`
+        );
+
+        console.log(
+            `[smart-click] Trace selection: ${selectionReason}`
+        );
+
+        if (actionsPath) {
             console.log(
                 `[smart-click] Actions file: ${actionsPath}`
             );
-
-            console.log(
-                `[smart-click] Actions selection: ${selectionReason}`
-            );
-
-            console.log(
-                `[smart-click] Recorded clicks: ${recordedClickCount}`
-            );
-
-            console.log(
-                `[smart-click] Executing spec: ${testFilePath}`
-            );
-
-            console.log(
-                "[smart-click] Spec, actions file and parent directories are writable."
-            );
-
-            /*
-             * createSmartClickPage() intercepts only Locator.click().
-             *
-             * Runtime candidate priority:
-             *
-             * 1. selector
-             * 2. primary_xpath
-             * 3. backup_xpath
-             *
-             * When selector works:
-             *
-             * - Click with selector.
-             * - Do not reconstruct anything.
-             * - Do not rewrite the spec or actions JSON.
-             *
-             * When selector fails and primary_xpath or backup_xpath works:
-             *
-             * - Treat the fallback-resolved element as the intended element.
-             * - Split the failed selector into structural XPath depths.
-             * - Resolve each XPath prefix in order.
-             * - Identify the first depth that no longer resolves uniquely.
-             * - Inspect only the failed XPath segment at that depth.
-             * - Determine which configured strategy the failed segment used.
-             *
-             * Fixed XPath strategy order:
-             *
-             * 1. id
-             * 2. data-testid
-             * 3. data-test
-             * 4. data-qa
-             * 5. data-cy
-             * 6. data-label
-             * 7. aria-label
-             * 8. aria-labelledby
-             * 9. name
-             * 10. placeholder
-             * 11. title
-             * 12. normalize-space(.)
-             *
-             * Sequential repair at the failed XPath depth:
-             *
-             * - Do not classify or filter any attribute value.
-             * - Do not classify IDs as static or dynamic.
-             * - An id is treated only as the "id" strategy.
-             * - Detect the exact strategy used by the failed segment.
-             * - Continue strictly from the next strategy in the fixed order.
-             * - Do not restart from id while still testing the failed node.
-             * - Do not retry the strategy that already failed on that node.
-             * - Do not combine multiple attributes.
-             * - Do not introduce custom stability heuristics.
-             *
-             * Parent escalation:
-             *
-             * - If every remaining strategy fails on the failed-depth node,
-             *   move exactly one DOM level upward.
-             * - On that parent, restart the complete 12-strategy order from
-             *   id.
-             * - For each candidate parent strategy, append the indexed
-             *   descendant path from that parent back to the exact element
-             *   identified by primary_xpath or backup_xpath.
-             * - Require the parent anchor XPath to resolve uniquely to that
-             *   exact parent node.
-             * - Require the complete rebuilt XPath to resolve uniquely to
-             *   the exact fallback-resolved target.
-             * - If that parent has no successful strategy, move upward one
-             *   more level and restart the complete 12-strategy order again.
-             * - Continue this process through BODY.
-             * - HTML is not used as a replacement anchor.
-             *
-             * Example:
-             *
-             * Failed selector:
-             *
-             * //span[@id='pv_id_1546']/button[1]
-             *
-             * Detected:
-             *
-             * failed depth = 1
-             * failed node = span
-             * failed strategy = id
-             *
-             * First, the remaining strategies are tried on the span:
-             *
-             * data-testid
-             * data-test
-             * data-qa
-             * data-cy
-             * data-label
-             * aria-label
-             * aria-labelledby
-             * name
-             * placeholder
-             * title
-             * normalize-space(.)
-             *
-             * If none succeeds, the algorithm moves to the parent div and
-             * restarts from id. A successful parent reconstruction may be:
-             *
-             * //div[normalize-space(.)=
-             * 'Requested Earliest Dropoffmm/dd/yyyy hh:mm']
-             * /span[1]/button[1]
-             *
-             * Every reconstructed selector must:
-             *
-             * - resolve to exactly one element;
-             * - resolve to the exact same DOM node found by primary_xpath or
-             *   backup_xpath;
-             * - pass Playwright's actionability trial before the real click.
-             *
-             * A purely positional failed segment such as div[5] is not one
-             * of the 12 configured strategies. In that case smart-click.js
-             * may continue from the deepest original XPath prefix that still
-             * resolves and rebuild only the remaining indexed descendant
-             * path.
-             *
-             * Real-click and persistence contract:
-             *
-             * - Trial clicks are diagnostic only.
-             * - Dispatch exactly one real application click.
-             * - Persist only after that real click succeeds.
-             * - Rewrite the executing .spec.js selector.
-             * - Rewrite selector, primary_xpath and backup_xpath in the
-             *   selected actions JSON.
-             * - Read both files back and verify the persisted values.
-             * - Never dispatch a second click because persistence failed.
-             *
-             * testFilePath identifies the exact executing .spec.js file.
-             *
-             * actionsPath identifies the exact actions JSON selected by
-             * matching its recorded click sequence against the executing
-             * spec.
-             *
-             * Other operations such as fill(), press(), hover(), goto(),
-             * waitFor(), check() and selectOption() remain unchanged.
-             */
-            const smartPage =
-                createSmartClickPage(
-                    page,
-                    actions,
-                    {
-                        testFilePath,
-                        actionsPath
-                    }
-                );
-
-            await use(
-                smartPage
-            );
         }
-    });
+
+        console.log(
+            `[smart-click] Recorded clicks: ${recordedClickCount}`
+        );
+
+        console.log(
+            [
+                "[smart-test]",
+                (
+                    "initial actionability timeout=" +
+                    `${INITIAL_ACTIONABILITY_TIMEOUT_MS}ms`
+                ),
+                (
+                    "retry delay=" +
+                    `${CLICK_RETRY_DELAY_MS}ms`
+                ),
+                (
+                    "retry actionability timeout=" +
+                    `${RETRY_ACTIONABILITY_TIMEOUT_MS}ms`
+                ),
+                (
+                    "probe slice=" +
+                    `${ACTIONABILITY_PROBE_SLICE_MS}ms`
+                ),
+                (
+                    "real click timeout=" +
+                    `${REAL_CLICK_TIMEOUT_MS}ms minimum`
+                )
+            ].join(" ")
+        );
+
+        const traceAwarePage = traceMode
+            ? createSmartClickPage(
+                page,
+                actions,
+                {
+                    testFilePath,
+                    actionsPath
+                }
+            )
+            : page;
+
+        const retryPage =
+            createDelayedClickRetryPage(
+                traceAwarePage,
+                {
+                    rawPage: page,
+                    traceSelectors
+                }
+            );
+
+        await use(retryPage);
+    }
+});
 
 module.exports = {
     test,

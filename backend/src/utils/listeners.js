@@ -5,6 +5,12 @@ function injectListeners() {
   const POINTER_CLICK_MAX_AGE_MS = 1500;
 
   /*
+   * Keep completed gesture IDs briefly so duplicate listeners or repeated
+   * delivery of the same physical event cannot record another action.
+   */
+  const CLICK_GESTURE_RETENTION_MS = 5000;
+
+  /*
    * Attribute-value quarantine.
    *
    * Any attribute whose value contains one of these fragments is excluded,
@@ -48,9 +54,6 @@ function injectListeners() {
    * 2. Consider the parent itself as an XPath anchor.
    * 3. Traverse the parent's previous and next sibling peers.
    * 4. Ascend to the next parent level.
-   *
-   * These are hierarchical priority components. A child subtree retains the
-   * CHILD prefix, so it is completed before the parent SELF phase.
    */
   const GRAPH_TRAVERSAL_PRIORITY = {
     CHILDREN: 0,
@@ -82,7 +85,11 @@ function injectListeners() {
   );
 
   /*
-   * Consecutive-click state.
+   * Shared click state.
+   *
+   * When same-origin access is available, every frame/listener uses the
+   * top-level window as the state owner. This allows duplicate listener
+   * instances to see the same gesture registry synchronously.
    */
   function getClickXPathStateOwner() {
     try {
@@ -109,6 +116,18 @@ function injectListeners() {
     clickXPathStateOwner
       .__PW_LAST_RECORDED_CLICK_XPATH__ =
       "";
+  }
+
+  if (
+    !clickXPathStateOwner
+      .__PW_RECORDED_CLICK_GESTURES__ ||
+    typeof clickXPathStateOwner
+      .__PW_RECORDED_CLICK_GESTURES__ !==
+      "object"
+  ) {
+    clickXPathStateOwner
+      .__PW_RECORDED_CLICK_GESTURES__ =
+      Object.create(null);
   }
 
   function getLastRecordedClickXPath() {
@@ -167,6 +186,190 @@ function injectListeners() {
         .__PW_LAST_RECORDED_CLICK_XPATH__ =
         "";
     }
+  }
+
+  function getRecordedClickGestures() {
+    let gestures =
+      clickXPathStateOwner
+        .__PW_RECORDED_CLICK_GESTURES__;
+
+    if (
+      !gestures ||
+      typeof gestures !==
+        "object"
+    ) {
+      gestures =
+        Object.create(null);
+
+      clickXPathStateOwner
+        .__PW_RECORDED_CLICK_GESTURES__ =
+        gestures;
+    }
+
+    return gestures;
+  }
+
+  function cleanupRecordedClickGestures() {
+    const gestures =
+      getRecordedClickGestures();
+
+    const now =
+      Date.now();
+
+    for (
+      const [
+        gestureId,
+        recordedAt,
+      ] of Object.entries(
+        gestures
+      )
+    ) {
+      if (
+        !Number.isFinite(
+          recordedAt
+        ) ||
+        now - recordedAt >
+          CLICK_GESTURE_RETENTION_MS
+      ) {
+        delete gestures[
+          gestureId
+        ];
+      }
+    }
+  }
+
+  function reserveClickGesture(
+    gestureId
+  ) {
+    if (!gestureId) {
+      return false;
+    }
+
+    cleanupRecordedClickGestures();
+
+    const gestures =
+      getRecordedClickGestures();
+
+    if (
+      Object.prototype.hasOwnProperty.call(
+        gestures,
+        gestureId
+      )
+    ) {
+      return false;
+    }
+
+    gestures[gestureId] =
+      Date.now();
+
+    return true;
+  }
+
+  function releaseClickGesture(
+    gestureId
+  ) {
+    if (!gestureId) {
+      return;
+    }
+
+    const gestures =
+      getRecordedClickGestures();
+
+    delete gestures[
+      gestureId
+    ];
+  }
+
+  function getAbsoluteEventTimestamp(
+    event
+  ) {
+    const relativeTimestamp =
+      Number.isFinite(
+        event?.timeStamp
+      )
+        ? event.timeStamp
+        : performance.now();
+
+    const timeOrigin =
+      Number.isFinite(
+        performance.timeOrigin
+      )
+        ? performance.timeOrigin
+        : (
+            Date.now() -
+            performance.now()
+          );
+
+    /*
+     * Microseconds retain enough resolution to distinguish consecutive
+     * physical clicks while remaining deterministic across duplicate
+     * listeners handling the same event.
+     */
+    return Math.round(
+      (
+        timeOrigin +
+        relativeTimestamp
+      ) *
+      1000
+    );
+  }
+
+  function createPointerGestureId(
+    event
+  ) {
+    return [
+      "pointer",
+      getAbsoluteEventTimestamp(
+        event
+      ),
+      Number.isFinite(
+        event?.pointerId
+      )
+        ? event.pointerId
+        : 0,
+      String(
+        event?.pointerType ||
+        "mouse"
+      ),
+      Number.isFinite(
+        event?.button
+      )
+        ? event.button
+        : 0,
+      Number.isFinite(
+        event?.clientX
+      )
+        ? Math.round(
+            event.clientX
+          )
+        : 0,
+      Number.isFinite(
+        event?.clientY
+      )
+        ? Math.round(
+            event.clientY
+          )
+        : 0,
+    ].join(":");
+  }
+
+  function createKeyboardGestureId(
+    event,
+    snapshot
+  ) {
+    return [
+      "keyboard",
+      getAbsoluteEventTimestamp(
+        event
+      ),
+      snapshot?.target
+        ?.localName ||
+        snapshot?.target
+          ?.tagName ||
+        "",
+      snapshot?.normalXPath ||
+        "",
+    ].join(":");
   }
 
   function omitNullFields(
@@ -1030,10 +1233,6 @@ function injectListeners() {
       return;
     }
 
-    /*
-     * The same candidate may be rediscovered through a different route.
-     * Preserve the route with the earlier hierarchical traversal priority.
-     */
     const pathComparison =
       compareGraphTraversalPath(
         candidate.traversalPath,
@@ -1062,16 +1261,6 @@ function injectListeners() {
       left,
       right
     ) {
-      /*
-       * The hierarchical traversal path is the primary queue order.
-       *
-       * This is what guarantees:
-       *
-       * ancestor children
-       *   before ancestor self
-       *   before ancestor peers
-       *   before the next parent level.
-       */
       const traversalComparison =
         compareGraphTraversalPath(
           left.traversalPath,
@@ -1084,10 +1273,6 @@ function injectListeners() {
         return traversalComparison;
       }
 
-      /*
-       * COLLECT states should run before another state with the exact same
-       * traversal path.
-       */
       const leftModePriority =
         left.mode === "COLLECT"
           ? 0
@@ -1588,20 +1773,6 @@ function injectListeners() {
     }
   }
 
-  /*
-   * Ancestor-aware bounded graph traversal.
-   *
-   * When an ancestor is reached, the ancestor is not collected immediately.
-   * Instead, the queue is staged as:
-   *
-   *   ancestor children
-   *   ancestor self
-   *   ancestor sibling peers
-   *   ancestor parent
-   *
-   * Child states can recursively inspect their own descendants before the
-   * ancestor SELF state is popped because they retain the CHILDREN prefix.
-   */
   function collectGraphCandidates(
     target
   ) {
@@ -1729,12 +1900,6 @@ function injectListeners() {
         state.element
       );
 
-      /*
-       * A normal element, including the original target and peer elements,
-       * may be collected immediately.
-       *
-       * An ancestor is delayed until its children have been queued first.
-       */
       if (!state.isAncestor) {
         if (
           !collectedElements.has(
@@ -1758,10 +1923,7 @@ function injectListeners() {
       }
 
       /*
-       * Phase 1: traverse children first.
-       *
-       * For a parent/ancestor, this traverses the path child and the path
-       * child's siblings before the parent itself becomes an anchor.
+       * Phase 1: children.
        */
       for (
         const child of
@@ -1805,7 +1967,7 @@ function injectListeners() {
       }
 
       /*
-       * Phase 2: after an ancestor's children, collect the ancestor itself.
+       * Phase 2: parent itself.
        */
       if (state.isAncestor) {
         queueSequence =
@@ -1819,9 +1981,7 @@ function injectListeners() {
       }
 
       /*
-       * Phase 3: inspect this element's sibling peers.
-       *
-       * When state.isAncestor is true, these are the parent's peers.
+       * Phase 3: sibling peers.
        */
       const siblingStates = [
         {
@@ -1896,7 +2056,7 @@ function injectListeners() {
       }
 
       /*
-       * Phase 4: ascend only after children, self and sibling peers.
+       * Phase 4: next parent.
        */
       const parent =
         state.element.parentElement;
@@ -3606,11 +3766,6 @@ function injectListeners() {
             relationVariant.score +
             xpath.length / 100;
 
-          /*
-           * Traversal ordering is already handled by candidate ranking.
-           * These scores choose the best expression inside the same
-           * traversal region.
-           */
           if (
             xpath.includes(
               "/following::"
@@ -3638,9 +3793,7 @@ function injectListeners() {
             score += 8;
           }
 
-          if (
-            !bestResult
-          ) {
+          if (!bestResult) {
             bestResult = {
               xpath,
               score,
@@ -3974,9 +4127,6 @@ function injectListeners() {
     return selector || "iframe";
   }
 
-  /*
-   * Positional XPath remains isolated to backup_xpath.
-   */
   function getHardcodedBackupXPath(
     element
   ) {
@@ -4772,6 +4922,15 @@ function injectListeners() {
           return;
         }
 
+        /*
+         * Duplicate listeners handling this same pointerdown receive the same
+         * deterministic gesture ID.
+         */
+        const gestureId =
+          createPointerGestureId(
+            event
+          );
+
         const snapshot =
           createValidatedClickSnapshot(
             event,
@@ -4788,6 +4947,21 @@ function injectListeners() {
 
         pendingPointerClick = {
           ...snapshot,
+
+          gestureId,
+
+          pointerId:
+            Number.isFinite(
+              event.pointerId
+            )
+              ? event.pointerId
+              : 0,
+
+          pointerType:
+            String(
+              event.pointerType ||
+              "mouse"
+            ),
 
           timeStamp:
             Number.isFinite(
@@ -4822,6 +4996,9 @@ function injectListeners() {
     "click",
     event => {
       let xpathKey = "";
+      let gestureId = "";
+      let gestureReserved =
+        false;
 
       try {
         if (
@@ -4888,6 +5065,10 @@ function injectListeners() {
 
           clickSnapshot =
             pointerClick;
+
+          gestureId =
+            pointerClick.gestureId ||
+            "";
         } else if (
           event.detail === 0
         ) {
@@ -4906,12 +5087,28 @@ function injectListeners() {
             return;
           }
 
-          clickSnapshot =
+          const keyboardSnapshot =
             createValidatedClickSnapshot(
               event,
               rawElement,
               "keyboard"
             );
+
+          if (!keyboardSnapshot) {
+            return;
+          }
+
+          gestureId =
+            createKeyboardGestureId(
+              event,
+              keyboardSnapshot
+            );
+
+          clickSnapshot = {
+            ...keyboardSnapshot,
+
+            gestureId,
+          };
         } else {
           return;
         }
@@ -4920,14 +5117,60 @@ function injectListeners() {
           return;
         }
 
+        if (!gestureId) {
+          gestureId =
+            clickSnapshot.gestureId ||
+            "";
+        }
+
+        if (!gestureId) {
+          console.warn(
+            "[click-recorder] Could not create gesture ID."
+          );
+
+          return;
+        }
+
+        /*
+         * This synchronous shared reservation is the primary duplicate-click
+         * guard. Only one listener can reserve a physical gesture.
+         */
+        if (
+          !reserveClickGesture(
+            gestureId
+          )
+        ) {
+          console.warn(
+            [
+              "[click-recorder]",
+              "Duplicate action from the same physical click ignored.",
+              `gestureId=${gestureId}`,
+            ].join(" ")
+          );
+
+          return;
+        }
+
+        gestureReserved =
+          true;
+
         if (
           !isStoredClickSnapshotValid(
             clickSnapshot
           )
         ) {
+          releaseClickGesture(
+            gestureId
+          );
+
+          gestureReserved =
+            false;
+
           console.warn(
             "Stored pre-click XPath values no longer point to the exact clicked element:",
             {
+              gestureId,
+
               selector:
                 clickSnapshot.selector,
 
@@ -4953,6 +5196,13 @@ function injectListeners() {
           );
 
         if (!xpathKey) {
+          releaseClickGesture(
+            gestureId
+          );
+
+          gestureReserved =
+            false;
+
           console.warn(
             "[click-recorder] Could not create non-quarantined XPath dedupe key."
           );
@@ -4965,11 +5215,19 @@ function injectListeners() {
             xpathKey
           )
         ) {
+          releaseClickGesture(
+            gestureId
+          );
+
+          gestureReserved =
+            false;
+
           console.warn(
             [
               "[click-recorder]",
               "Consecutive duplicate XPath ignored.",
               `xpath=${xpathKey}`,
+              `gestureId=${gestureId}`,
             ].join(" ")
           );
 
@@ -5003,13 +5261,20 @@ function injectListeners() {
         const sequence =
           ++actionSequence;
 
+        /*
+         * clickId identifies this physical gesture.
+         *
+         * xpathKey continues to identify the selector.
+         */
         const clickId =
-          xpathKey;
+          gestureId;
 
         const capturedAction =
           prepareAction({
             action:
               "click",
+
+            gestureId,
 
             clickId,
 
@@ -5035,6 +5300,8 @@ function injectListeners() {
           });
 
         const job = {
+          gestureId,
+
           clickId,
 
           xpathKey,
@@ -5071,7 +5338,20 @@ function injectListeners() {
           capturedAction,
 
           clickEvent: {
+            gestureId,
+
             inputMethod,
+
+            pointerId:
+              Number.isFinite(
+                clickSnapshot.pointerId
+              )
+                ? clickSnapshot.pointerId
+                : null,
+
+            pointerType:
+              clickSnapshot.pointerType ||
+              null,
 
             detail:
               Number.isFinite(
@@ -5124,6 +5404,10 @@ function injectListeners() {
             .__captureClickAction(job)
             .then(result => {
               if (result?.duplicate) {
+                /*
+                 * Keep the gesture reserved. Another action with the same
+                 * physical-click ID has already been accepted.
+                 */
                 markClickXPathSaved(
                   xpathKey
                 );
@@ -5132,6 +5416,7 @@ function injectListeners() {
                   [
                     "[click-recorder]",
                     "Backend rejected click as duplicate.",
+                    `gestureId=${gestureId}`,
                     `xpath=${xpathKey}`,
                   ].join(" ")
                 );
@@ -5146,6 +5431,10 @@ function injectListeners() {
               ) {
                 releaseClickXPath(
                   xpathKey
+                );
+
+                releaseClickGesture(
+                  gestureId
                 );
 
                 console.warn(
@@ -5163,6 +5452,10 @@ function injectListeners() {
             .catch(error => {
               releaseClickXPath(
                 xpathKey
+              );
+
+              releaseClickGesture(
+                gestureId
               );
 
               console.warn(
@@ -5185,6 +5478,10 @@ function injectListeners() {
                 xpathKey
               );
 
+              releaseClickGesture(
+                gestureId
+              );
+
               console.warn(
                 "Click dispatch was rejected:",
                 result
@@ -5202,6 +5499,10 @@ function injectListeners() {
               xpathKey
             );
 
+            releaseClickGesture(
+              gestureId
+            );
+
             console.warn(
               "Click dispatch failed:",
               error
@@ -5211,6 +5512,15 @@ function injectListeners() {
         if (xpathKey) {
           releaseClickXPath(
             xpathKey
+          );
+        }
+
+        if (
+          gestureReserved &&
+          gestureId
+        ) {
+          releaseClickGesture(
+            gestureId
           );
         }
 
